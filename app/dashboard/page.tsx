@@ -7,6 +7,37 @@ import type { AromiRequest, AromiResponse, UserContext, FoodLogEntry, Macros } f
 import { loadLog, saveLog, last7DaysCalories, last7DaysMacros, dateKey } from "@/lib/storage";
 import { getUser, logout as logoutLocal } from "@/lib/auth";
 
+function extractEstimatedCalories(data: Record<string, unknown> | undefined): number | null {
+  if (!data) return null;
+
+  const tryNumber = (value: unknown): number | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const n = Number(value.replace(/[^\d.]/g, ""));
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  };
+
+  const directKeys = ["estimated_calories", "calories", "kcal"] as const;
+  for (const key of directKeys) {
+    if (key in data) {
+      const n = tryNumber((data as Record<string, unknown>)[key]);
+      if (n != null) return n;
+    }
+  }
+
+  const nested = (data as Record<string, unknown>).nutrition;
+  if (nested && typeof nested === "object") {
+    for (const key of directKeys) {
+      const n = tryNumber((nested as Record<string, unknown>)[key]);
+      if (n != null) return n;
+    }
+  }
+
+  return null;
+}
+
 const DEFAULT_CONTEXT: UserContext = {
   age: 21,
   height_cm: 175,
@@ -103,8 +134,8 @@ export default function DashboardPage() {
         });
         const data = (await res.json()) as AromiResponse;
         setLastResponse(data);
-        const cal = data.data?.estimated_calories;
-        if (typeof cal === "number" && (intent === "food_estimation" || intent === "food_log")) {
+        const cal = extractEstimatedCalories(data.data as Record<string, unknown> | undefined);
+        if (cal != null && Number.isFinite(cal) && (intent === "food_estimation" || intent === "food_log")) {
           const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
           setPendingLog({
             food_text: (intent === "food_estimation" || intent === "food_log" ? input : "") || "Logged food",
@@ -158,7 +189,8 @@ export default function DashboardPage() {
   }, [input, send]);
 
   const d = lastResponse?.data;
-  const hasCalories = d?.estimated_calories != null && typeof d.estimated_calories === "number";
+  const estimatedCaloriesValue = extractEstimatedCalories(d as Record<string, unknown> | undefined);
+  const hasCalories = estimatedCaloriesValue != null && !Number.isNaN(estimatedCaloriesValue);
   const showConfirm = hasCalories && pendingLog;
   const showWorkout = lastResponse?.ui_hint === "show_workout" && d?.days != null;
 
@@ -486,10 +518,10 @@ export default function DashboardPage() {
               {lastResponse && tab === "log" && hasCalories && (
                 <div className="mt-4 p-4 bg-surface3 rounded-lg border border-border">
                   <p className="text-gray-200 text-sm">{lastResponse.message}</p>
-                  <p className="text-accent font-semibold mt-2">~{Number(d!.estimated_calories)} kcal</p>
+                  <p className="text-accent font-semibold mt-2">~{estimatedCaloriesValue} kcal</p>
                   <button
                     onClick={() => {
-                      const cal = Number(d!.estimated_calories);
+                      const cal = estimatedCaloriesValue ?? Number(d!.estimated_calories);
                       const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
                       const entry = pendingLog ?? {
                         food_text: input,

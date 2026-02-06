@@ -31,9 +31,12 @@ export async function POST(req: Request) {
       ...(apiNutrition && { api_nutrition_hint: apiNutrition }),
     };
     const userInput = JSON.stringify(payload);
+    const temperature =
+      body.intent === "workout_plan" || body.intent === "adjust_plan" ? 0.85 : 0.3;
     const aiResponse = await callGroq<AromiResponse>({
       systemPrompt: AROMI_SYSTEM_PROMPT,
       userInput,
+      temperature,
     });
     return NextResponse.json(aiResponse);
   } catch (e) {
