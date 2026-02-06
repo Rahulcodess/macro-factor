@@ -45,17 +45,19 @@ function LoginInner() {
 
         <form
           className="mt-6 space-y-4"
-          onSubmit={(e) => {
+          onSubmit={async (e) => {
             e.preventDefault();
             setError(null);
             setLoading(true);
             try {
-              const res = login(email, password);
+              const res = await login(email, password);
               if (!res.ok) {
                 setError(res.error);
                 return;
               }
               router.push(next);
+            } catch (err) {
+              setError("Something went wrong. Please try again.");
             } finally {
               setLoading(false);
             }

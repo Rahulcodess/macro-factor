@@ -16,14 +16,14 @@ The stack is plain Next.js + TypeScript + Tailwind, wired to Groq and Open Food 
 ## What the app does
 
 - **Food logging with AI help**
-  - Type real-world food like *“2 rotis with paneer butter masala”*.
+  - Type real-world food like *"2 rotis with paneer butter masala"*.
   - AROMI estimates calories and macros using Open Food Facts where possible, then fills in the gaps with the model.
   - Results always include uncertainty (ranges, not fake precision) and you decide what actually gets logged.
 
 - **Daily dashboard**
   - 7‑day calorie trend line.
   - Macro breakdown chart (protein / carbs / fat) based on your food log.
-  - Today’s summary cards so you can quickly see how the day is going.
+  - Today's summary cards so you can quickly see how the day is going.
 
 - **Workout guidance**
   - Plans are generated based on age, activity level, goal, injuries, and available equipment.
@@ -41,7 +41,8 @@ The stack is plain Next.js + TypeScript + Tailwind, wired to Groq and Open Food 
 - **Styling**: Tailwind CSS with a custom dark theme
 - **AI**: Groq `llama-3.3-70b-versatile`
 - **Nutrition data**: Open Food Facts (free, no auth)
-- **Storage**: `localStorage` for demo auth and food logs
+- **Database**: PostgreSQL (Neon, Supabase, or any Postgres provider)
+- **Storage**: PostgreSQL for food logs and user data
 
 ---
 
@@ -53,21 +54,45 @@ The stack is plain Next.js + TypeScript + Tailwind, wired to Groq and Open Food 
 npm install
 ```
 
-2. **Create your env file**
+2. **Set up your database**
+
+Create a PostgreSQL database (Neon, Supabase, Railway, etc.) and run the schema:
+
+```bash
+psql $DATABASE_URL < schema.sql
+```
+
+Or connect manually and paste the contents of `schema.sql`.
+
+3. **Create your env file**
 
 ```bash
 cp .env.example .env
 ```
 
-Then set `GROQ_API_KEY` in `.env` (you can generate a free key from the Groq console).
+Then set:
+- `GROQ_API_KEY` — Get a free key from [Groq Console](https://console.groq.com)
+- `DATABASE_URL` — Your PostgreSQL connection string (e.g., from Neon or Supabase)
 
-3. **Run the dev server**
+4. **Run the dev server**
 
 ```bash
 npm run dev
 ```
 
 The app will be available at `http://localhost:3000`.
+
+---
+
+## Database schema
+
+The app uses PostgreSQL with three main tables:
+
+- `users` — User accounts (email, name, timestamps)
+- `food_logs` — Food entries with calories, macros, and metadata
+- `workout_plans` — Generated workout plans (optional, for future use)
+
+See `schema.sql` for the full schema definition.
 
 ---
 
@@ -85,19 +110,47 @@ All of this is designed so you can iterate quickly on the prompt and UI without 
 
 ---
 
+## API routes
+
+- `POST /api/auth/login` — Login/create user account
+- `GET /api/auth/user` — Get current user (requires Authorization header)
+- `GET /api/food-logs` — Get user's food logs (requires Authorization header)
+- `POST /api/food-logs` — Create a food log entry (requires Authorization header)
+- `DELETE /api/food-logs?id=...` — Delete a food log entry (requires Authorization header)
+- `POST /api/aromi` — Main AROMI AI endpoint
+- `GET /api/food/nutrition?q=...` — Open Food Facts search (no auth)
+
+---
+
+## Deployment
+
+### Vercel
+
+1. Push your code to GitHub
+2. Import the project in Vercel
+3. Add environment variables:
+   - `GROQ_API_KEY`
+   - `DATABASE_URL`
+4. Deploy
+
+The app will automatically build and deploy. Make sure your database is accessible from Vercel's IP ranges (Neon and Supabase allow this by default).
+
+---
+
 ## Production notes
 
-This repo is intentionally minimal:
+This repo is intentionally minimal but production-ready:
 
-- Auth is a simple `localStorage` demo, not real authentication.
-- Food logs are stored locally in the browser.
-- There’s no backend database or user accounts.
+- Auth uses PostgreSQL-backed user accounts (no password hashing yet — add bcrypt if needed).
+- Food logs are stored in PostgreSQL with proper user isolation.
+- API routes use Bearer token auth (user ID from localStorage).
 
-If you want to take this beyond a demo, the next steps would be:
+If you want to take this further:
 
-- Swap `localStorage` for a real database (Supabase, Postgres, etc.).
-- Replace the demo login with proper auth.
-- Add server‑side persistence for food logs and workout history.
-- Tighten up validation and rate‑limiting around the AI endpoint.
+- Add password hashing (bcrypt) for real auth.
+- Add rate limiting around the AI endpoint.
+- Add server-side session management (JWT or cookies).
+- Tighten up validation and error handling.
+- Add database migrations (Prisma, Drizzle, etc.).
 
-Until then, it’s a solid, realistic demo you can show to judges, teammates, or investors without having to explain away fake data or complicated setup.
+Until then, it's a solid, realistic demo you can show to judges, teammates, or investors without having to explain away fake data or complicated setup.

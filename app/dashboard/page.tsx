@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AromiRequest, AromiResponse, UserContext, FoodLogEntry, Macros } from "@/lib/types";
-import { loadLog, saveLog, last7DaysCalories, last7DaysMacros, dateKey } from "@/lib/storage";
+import { loadLog, saveLogEntry, deleteLogEntry, last7DaysCalories, last7DaysMacros, dateKey } from "@/lib/storage";
 import { getUser, logout as logoutLocal } from "@/lib/auth";
 
 function extractEstimatedCalories(data: Record<string, unknown> | undefined): number | null {
@@ -83,28 +83,24 @@ export default function DashboardPage() {
     setUserEmail(u.email);
   }, [router]);
 
-  const logLoadedRef = useRef(false);
   useEffect(() => {
-    setLog(loadLog());
-    logLoadedRef.current = true;
-  }, []);
-  useEffect(() => {
-    if (logLoadedRef.current) saveLog(log);
-  }, [log]);
-
-  const addToLog = useCallback((entry: Omit<FoodLogEntry, "id" | "created_at">) => {
-    setLog((prev) => [
-      ...prev,
-      {
-        ...entry,
-        id: crypto.randomUUID(),
-        created_at: new Date().toISOString(),
-      },
-    ]);
+    loadLog().then((logs) => {
+      setLog(logs);
+    });
   }, []);
 
-  const removeFromLog = useCallback((id: string) => {
-    setLog((prev) => prev.filter((e) => e.id !== id));
+  const addToLog = useCallback(async (entry: Omit<FoodLogEntry, "id" | "created_at">) => {
+    const saved = await saveLogEntry(entry);
+    if (saved) {
+      setLog((prev) => [saved, ...prev]);
+    }
+  }, []);
+
+  const removeFromLog = useCallback(async (id: string) => {
+    const deleted = await deleteLogEntry(id);
+    if (deleted) {
+      setLog((prev) => prev.filter((e) => e.id !== id));
+    }
   }, []);
 
   const send = useCallback(
@@ -162,9 +158,9 @@ export default function DashboardPage() {
     [input, mealType, grams]
   );
 
-  const handleConfirmLog = useCallback(() => {
+  const handleConfirmLog = useCallback(async () => {
     if (!pendingLog) return;
-    addToLog({
+    await addToLog({
       food_text: pendingLog.food_text,
       meal_type: pendingLog.meal_type,
       estimated_calories: pendingLog.estimated_calories,
@@ -444,16 +440,16 @@ export default function DashboardPage() {
                   {[...new Map(todayEntries.map((e) => [e.food_text, e])).values()].slice(0, 5).map((entry) => (
                     <button
                       key={entry.id}
-                      onClick={() =>
-                        addToLog({
+                      onClick={async () => {
+                        await addToLog({
                           food_text: entry.food_text,
                           meal_type: entry.meal_type,
                           estimated_calories: entry.estimated_calories,
                           grams: entry.grams,
                           confidence_range: entry.confidence_range,
                           macros: entry.macros,
-                        })
-                      }
+                        });
+                      }}
                       className="shrink-0 flex items-center gap-2 bg-surface2 border border-border rounded-xl shadow-sm px-4 py-2.5 text-sm text-white hover:border-accent/50 hover:text-accent transition-colors"
                     >
                       <span className="truncate max-w-[100px]">{entry.food_text}</span>
@@ -520,7 +516,7 @@ export default function DashboardPage() {
                   <p className="text-gray-200 text-sm">{lastResponse.message}</p>
                   <p className="text-accent font-semibold mt-2">~{estimatedCaloriesValue} kcal</p>
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       const cal = estimatedCaloriesValue ?? Number(d!.estimated_calories);
                       const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
                       const entry = pendingLog ?? {
@@ -531,7 +527,7 @@ export default function DashboardPage() {
                         confidence_range: d!.confidence_range as string | undefined,
                         macros: d!.macros as Macros | undefined,
                       };
-                      addToLog({
+                      await addToLog({
                         food_text: entry.food_text,
                         meal_type: entry.meal_type,
                         estimated_calories: entry.estimated_calories,
@@ -570,7 +566,9 @@ export default function DashboardPage() {
                       <div className="flex items-center gap-3 shrink-0">
                         <span className="text-accent font-semibold tabular-nums">~{entry.estimated_calories}</span>
                         <button
-                          onClick={() => removeFromLog(entry.id)}
+                          onClick={async () => {
+                            await removeFromLog(entry.id);
+                          }}
                           className="text-muted hover:text-red-400 text-lg leading-none w-6 h-6 flex items-center justify-center rounded"
                           aria-label="Remove"
                         >

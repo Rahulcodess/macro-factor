@@ -1,4 +1,5 @@
 export type AuthUser = {
+  id: string;
   email: string;
   name: string;
   createdAt: string;
@@ -12,34 +13,40 @@ export function getUser(): AuthUser | null {
     const raw = localStorage.getItem(USER_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as AuthUser;
-    if (!parsed?.email) return null;
+    if (!parsed?.email || !parsed?.id) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
-export function login(email: string, password: string): { ok: true; user: AuthUser } | { ok: false; error: string } {
-  // Hackathon-safe demo auth:
-  // - No server, no DB, no paid service.
-  // - Accept any non-empty email + password (min length).
-  const e = email.trim().toLowerCase();
-  if (!e || !e.includes("@")) return { ok: false, error: "Enter a valid email." };
-  if (!password || password.length < 4) return { ok: false, error: "Password must be at least 4 characters." };
-
-  const user: AuthUser = {
-    email: e,
-    name: e.split("@")[0] || "User",
-    createdAt: new Date().toISOString(),
-  };
-
+export async function login(
+  email: string,
+  password: string
+): Promise<{ ok: true; user: AuthUser } | { ok: false; error: string }> {
   try {
-    localStorage.setItem(USER_KEY, JSON.stringify(user));
-  } catch {
-    return { ok: false, error: "Could not save session. Try again." };
-  }
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
 
-  return { ok: true, user };
+    const data = await res.json();
+    if (!data.ok || !data.user) {
+      return { ok: false, error: data.error || "Login failed" };
+    }
+
+    // Store user in localStorage for client-side access
+    try {
+      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    } catch {
+      // ignore localStorage errors
+    }
+
+    return { ok: true, user: data.user };
+  } catch (error) {
+    return { ok: false, error: "Network error. Please try again." };
+  }
 }
 
 export function logout(): void {

@@ -1,25 +1,74 @@
 import type { FoodLogEntry } from "./types";
 
-const LOG_KEY = "macrofactor_food_log";
-
-export function loadLog(): FoodLogEntry[] {
+export async function loadLog(): Promise<FoodLogEntry[]> {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(LOG_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as FoodLogEntry[];
-    return Array.isArray(parsed) ? parsed : [];
+    const user = getUser();
+    if (!user?.id) return [];
+
+    const res = await fetch("/api/food-logs", {
+      headers: {
+        Authorization: `Bearer ${user.id}`,
+      },
+    });
+
+    const data = await res.json();
+    return Array.isArray(data.logs) ? data.logs : [];
   } catch {
     return [];
   }
 }
 
-export function saveLog(log: FoodLogEntry[]): void {
-  if (typeof window === "undefined") return;
+export async function saveLogEntry(entry: Omit<FoodLogEntry, "id" | "created_at">): Promise<FoodLogEntry | null> {
+  if (typeof window === "undefined") return null;
   try {
-    localStorage.setItem(LOG_KEY, JSON.stringify(log));
+    const user = getUser();
+    if (!user?.id) return null;
+
+    const res = await fetch("/api/food-logs", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${user.id}`,
+      },
+      body: JSON.stringify(entry),
+    });
+
+    const data = await res.json();
+    return data.ok ? data.entry : null;
   } catch {
-    // ignore
+    return null;
+  }
+}
+
+export async function deleteLogEntry(id: string): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  try {
+    const user = getUser();
+    if (!user?.id) return false;
+
+    const res = await fetch(`/api/food-logs?id=${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${user.id}`,
+      },
+    });
+
+    const data = await res.json();
+    return data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+function getUser() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem("macrofactor_auth_user");
+    if (!raw) return null;
+    return JSON.parse(raw) as { id: string; email: string; name: string; createdAt: string } | null;
+  } catch {
+    return null;
   }
 }
 
