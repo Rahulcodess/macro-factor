@@ -11,6 +11,14 @@ export function getPool(): Pool {
 
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
+    // Don't throw during build - return a mock pool that will fail gracefully
+    if (process.env.NEXT_PHASE === "phase-production-build") {
+      console.warn("DATABASE_URL not set during build - this is OK for static pages");
+      pool = new Pool({
+        connectionString: "postgresql://",
+      });
+      return pool;
+    }
     throw new Error("DATABASE_URL environment variable is not set");
   }
 

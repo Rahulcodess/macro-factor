@@ -10,6 +10,9 @@ function getUserId(req: Request): string | null {
 
 export async function GET(req: Request) {
   try {
+    if (!process.env.DATABASE_URL) {
+      return NextResponse.json({ logs: [] }, { status: 200 });
+    }
     const userId = getUserId(req);
     if (!userId) {
       return NextResponse.json({ logs: [] }, { status: 200 });
@@ -58,6 +61,12 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
+    if (!process.env.DATABASE_URL) {
+      return NextResponse.json(
+        { ok: false, error: "Database not configured" },
+        { status: 500 }
+      );
+    }
     const userId = getUserId(req);
     if (!userId) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });

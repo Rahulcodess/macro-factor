@@ -3,6 +3,13 @@ import { query } from "@/lib/db";
 
 export async function POST(req: Request) {
   try {
+    // Check if DATABASE_URL is set
+    if (!process.env.DATABASE_URL) {
+      return NextResponse.json(
+        { ok: false, error: "Database not configured. Please set DATABASE_URL." },
+        { status: 500 }
+      );
+    }
     const { email, password } = await req.json();
 
     if (!email || typeof email !== "string" || !email.includes("@")) {
