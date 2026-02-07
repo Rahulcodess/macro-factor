@@ -145,8 +145,9 @@ export async function POST(req: Request) {
         !fromCalorieNinjas && isFat && calories < minSaneForFat;
 
       if (!skipOff) {
-        const whey = wheyOverride(foodText, calories, body.grams);
-        const fat = fatOverride(foodText, calories, body.grams);
+        const gramsArg = body.grams != null && body.grams > 0 ? body.grams : undefined;
+        const whey = wheyOverride(foodText, calories, gramsArg);
+        const fat = fatOverride(foodText, calories, gramsArg);
         if (whey) {
           calories = whey.calories;
           protein_g = whey.protein_g;
@@ -185,8 +186,9 @@ export async function POST(req: Request) {
       const sane = sanitizeCalories(raw);
       let calories = sane != null ? sane : (typeof raw === "number" && Number.isFinite(raw) ? raw : 0);
       const foodText = body.food_text && typeof body.food_text === "string" ? body.food_text : "";
-      const whey = wheyOverride(foodText, calories, body.grams);
-      const fat = fatOverride(foodText, calories, body.grams);
+      const gramsOpt = (body.grams != null && body.grams > 0) ? body.grams : undefined;
+      const whey = wheyOverride(foodText, calories, gramsOpt);
+      const fat = fatOverride(foodText, calories, gramsOpt);
       if (whey) {
         aiResponse.data = {
           ...aiResponse.data,
