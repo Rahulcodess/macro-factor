@@ -67,7 +67,7 @@ function sanitizeCalories(raw: number): number | null {
 }
 
 /** Cap obviously wrong estimates for common Indian breads (e.g. 2 chapati ~120–160 kcal). */
-function capFoodCalories(foodText: string, calories: number): number {
+function capChapatiRotiCalories(foodText: string, calories: number): number {
   if (!/\b(chapati|chappati|roti|phulka|paratha)\b/i.test(foodText)) return calories;
   const match = foodText.match(/(\d+)\s*(piece|pc|pcs|no|number)?/i) || foodText.match(/^(\d+)/);
   const pieces = match ? Math.min(10, Math.max(1, parseInt(match[1], 10))) : 2;
@@ -88,7 +88,7 @@ function capEggCalories(foodText: string, calories: number): number {
 /** Apply all food-specific caps so displayed/saved calories are sane. */
 function capFoodCalories(foodText: string, calories: number): number {
   let out = calories;
-  out = capFoodCalories(foodText, out);
+  out = capChapatiRotiCalories(foodText, out);
   out = capEggCalories(foodText, out);
   return out;
 }
