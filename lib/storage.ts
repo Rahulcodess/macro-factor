@@ -106,13 +106,14 @@ export function last7DaysMacros(log: FoodLogEntry[]): DayMacros[] {
     const key = localDateKey(d);
     byDay[key] = { date: key, calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0 };
   }
+  const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
   for (const e of log) {
     const day = entryLocalDate(e.created_at);
     if (byDay[day]) {
-      byDay[day].calories += e.estimated_calories;
-      byDay[day].protein_g += e.macros?.protein_g ?? 0;
-      byDay[day].carbs_g += e.macros?.carbs_g ?? 0;
-      byDay[day].fat_g += e.macros?.fat_g ?? 0;
+      byDay[day].calories += Number.isFinite(e.estimated_calories) ? e.estimated_calories : 0;
+      byDay[day].protein_g += num(e.macros?.protein_g);
+      byDay[day].carbs_g += num(e.macros?.carbs_g);
+      byDay[day].fat_g += num(e.macros?.fat_g);
     }
   }
   return Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date));

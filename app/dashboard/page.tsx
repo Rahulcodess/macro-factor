@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import type { AromiRequest, AromiResponse, UserContext, FoodLogEntry, Macros } from "@/lib/types";
 import { loadLog, saveLogEntry, deleteLogEntry, last7DaysCalories, last7DaysMacros, localDateKey, entryLocalDate } from "@/lib/storage";
 import { getUser, logout as logoutLocal } from "@/lib/auth";
+import { loadProfile, saveProfile, computeTargets, type UserProfile, type ActivityLevel, type Goal, type Equipment } from "@/lib/profile";
 
 /** Max sane kcal per serving; above this we assume wrong unit or garbage. */
 const MAX_KCAL_PER_SERVING = 2000;
@@ -85,9 +86,69 @@ function capEggCalories(foodText: string, calories: number): number {
   return Math.min(calories, count * maxPerEgg);
 }
 
-/** Apply all food-specific caps so displayed/saved calories are sane. */
-function capFoodCalories(foodText: string, calories: number): number {
+/** Floor for whey/protein powder (1 scoop ≈ 100–120 kcal; avoid 29 kcal from bad API). */
+function floorWheyCalories(foodText: string, calories: number): number {
+  if (!/\b(whey|protein\s*powder|scoop|schoop)\b/i.test(foodText)) return calories;
+  const match = foodText.match(/(\d+)\s*(scoop|schoop|scoops)?/i) || foodText.match(/^(\d+)/);
+  const scoops = match ? Math.min(5, Math.max(1, parseInt(match[1], 10))) : 1;
+  const minPerScoop = 100;
+  return Math.max(calories, scoops * minPerScoop);
+}
+
+/** Format macro for display: number → "Xg", string (e.g. "12-14g") → as-is to avoid "gg". */
+function formatMacroValue(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return `${Math.round(value)}g`;
+  if (typeof value === "string") return value.trim();
+  return "—";
+}
+
+/** Parse grams from text e.g. "5g butter". */
+function parseGramsFromFoodText(foodText: string): number | undefined {
+  const m = foodText.match(/(\d+)\s*g\b/i) || foodText.match(/\b(\d+)\s*grams?\b/i);
+  if (!m) return undefined;
+  const n = parseInt(m[1], 10);
+  return n > 0 && n <= 1000 ? n : undefined;
+}
+
+/** Floor for butter/oil (e.g. 5g butter ≈ 36 kcal, not 1). */
+function floorButterOilCalories(foodText: string, calories: number, grams?: number): number {
+  const g = (grams && grams > 0) ? grams : parseGramsFromFoodText(foodText);
+  if (!g) return calories;
+  if (!/\b(butter|ghee|oil|amul|refined)\b/i.test(foodText)) return calories;
+  const kcalPerGram = /\b(oil|refined|mustard|olive)\b/i.test(foodText) ? 9 : 7.2;
+  const minCal = Math.round(g * kcalPerGram * 0.8);
+  return Math.max(calories, minCal);
+}
+
+/** Floor for eggs (e.g. 2 eggs ≈ 140 kcal min). */
+function floorEggCalories(foodText: string, calories: number): number {
+  if (!/\b(egg|eggs)\b/i.test(foodText)) return calories;
+  const match = foodText.match(/(\d+)\s*(egg|eggs)?/i) || foodText.match(/^(\d+)/);
+  const count = match ? Math.min(20, Math.max(1, parseInt(match[1], 10))) : 1;
+  const minPerEgg = 70;
+  return Math.max(calories, count * minPerEgg);
+}
+
+/** When text has both eggs and oil, floor = egg_min + oil_min so combined items are sane. */
+function combinedEggOilFloor(foodText: string, calories: number, grams?: number): number {
+  const hasEgg = /\b(egg|eggs)\b/i.test(foodText);
+  const hasOil = /\b(butter|ghee|oil|amul|refined)\b/i.test(foodText);
+  if (!hasEgg || !hasOil) return calories;
+  const eggMatch = foodText.match(/(\d+)\s*(egg|eggs)?/i) || foodText.match(/^(\d+)/);
+  const eggCount = eggMatch ? Math.min(20, Math.max(1, parseInt(eggMatch[1], 10))) : 1;
+  const oilG = (grams && grams > 0) ? grams : parseGramsFromFoodText(foodText);
+  const oilMin = oilG ? Math.round(oilG * 7 * 0.8) : 0;
+  const combinedMin = eggCount * 70 + oilMin;
+  return Math.max(calories, combinedMin);
+}
+
+/** Apply all food-specific caps/floors so displayed/saved calories are sane. */
+function capFoodCalories(foodText: string, calories: number, grams?: number): number {
   let out = calories;
+  out = floorWheyCalories(foodText, out);
+  out = combinedEggOilFloor(foodText, out, grams);
+  out = floorButterOilCalories(foodText, out, grams);
+  out = floorEggCalories(foodText, out);
   out = capChapatiRotiCalories(foodText, out);
   out = capEggCalories(foodText, out);
   return out;
@@ -105,8 +166,6 @@ const DEFAULT_CONTEXT: UserContext = {
   injuries: [],
   equipment: "gym",
 };
-
-const TARGETS = { kcal: 2000, protein_g: 150, carbs_g: 200, fat_g: 65 };
 
 type Tab = "dashboard" | "log" | "chat" | "workout";
 
@@ -130,19 +189,27 @@ export default function DashboardPage() {
   } | null>(null);
 
   // Workout profile (used to optimize plan)
-  const [workoutAge, setWorkoutAge] = useState<number>(25);
-  const [workoutActivity, setWorkoutActivity] = useState<UserContext["activity_level"]>("moderate");
-  const [workoutGender, setWorkoutGender] = useState<UserContext["gender"]>("other");
-  const [workoutGoal, setWorkoutGoal] = useState<UserContext["goal"]>("general_fitness");
-  const [workoutEquipment, setWorkoutEquipment] = useState<UserContext["equipment"]>("gym");
-
   // Log loading & feedback
   const [logLoading, setLogLoading] = useState(true);
   const [logLoadError, setLogLoadError] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<"added" | "error" | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Auth guard
+  const defaultProfile: UserProfile = {
+    age: 25,
+    activity_level: "moderate",
+    weight_kg: 70,
+    height_cm: 170,
+    goal: "general_fitness",
+    gender: "other",
+    equipment: "gym",
+  };
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileDraft, setProfileDraft] = useState<UserProfile>(defaultProfile);
+  const [profileSaved, setProfileSaved] = useState(false);
+
+  const targets = computeTargets(profile ?? profileDraft);
+
   useEffect(() => {
     const u = getUser();
     if (!u) {
@@ -150,7 +217,21 @@ export default function DashboardPage() {
       return;
     }
     setUserEmail(u.email);
+    const loaded = loadProfile(u.id);
+    if (loaded) {
+      setProfile(loaded);
+      setProfileDraft(loaded);
+    }
   }, [router]);
+
+  const handleSaveProfile = useCallback(() => {
+    const u = getUser();
+    if (!u) return;
+    saveProfile(u.id, profileDraft);
+    setProfile(profileDraft);
+    setProfileSaved(true);
+    setTimeout(() => setProfileSaved(false), 2000);
+  }, [profileDraft]);
 
   const refetchLog = useCallback(() => {
     setLogLoading(true);
@@ -228,7 +309,7 @@ export default function DashboardPage() {
         const cal = extractEstimatedCalories(data.data as Record<string, unknown> | undefined);
         if (cal != null && Number.isFinite(cal) && (intent === "food_estimation" || intent === "food_log")) {
           const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
-          const cappedCal = capFoodCalories(intent === "food_estimation" || intent === "food_log" ? input : "", cal);
+          const cappedCal = capFoodCalories(intent === "food_estimation" || intent === "food_log" ? input : "", cal, gramsNum);
           setPendingLog({
             food_text: (intent === "food_estimation" || intent === "food_log" ? input : "") || "Logged food",
             meal_type: mealType,
@@ -270,33 +351,36 @@ export default function DashboardPage() {
     setGrams("");
   }, [pendingLog, addToLog]);
 
+  const activeProfile = profile ?? profileDraft;
   const workoutContext = useCallback(
     (): UserContext => ({
       ...DEFAULT_CONTEXT,
-      age: workoutAge,
-      activity_level: workoutActivity,
-      gender: workoutGender,
-      goal: workoutGoal,
-      equipment: workoutEquipment,
+      age: activeProfile.age,
+      activity_level: activeProfile.activity_level,
+      gender: activeProfile.gender,
+      goal: activeProfile.goal,
+      equipment: activeProfile.equipment,
     }),
-    [workoutAge, workoutActivity, workoutGender, workoutGoal, workoutEquipment]
+    [activeProfile.age, activeProfile.activity_level, activeProfile.gender, activeProfile.goal, activeProfile.equipment]
   );
 
+  const [workoutAdjustInput, setWorkoutAdjustInput] = useState("");
+
   const handleGenerateWorkout = useCallback(() => {
-    setInput("");
     send("workout_plan", { user_context: workoutContext() });
   }, [send, workoutContext]);
 
   const handleAdjustPlan = useCallback(() => {
-    if (!input.trim()) return;
-    send("adjust_plan", { user_context: workoutContext() });
-  }, [input, send, workoutContext]);
+    if (!workoutAdjustInput.trim()) return;
+    send("adjust_plan", { user_context: workoutContext(), food_text: workoutAdjustInput });
+  }, [workoutAdjustInput, send, workoutContext]);
 
   const d = lastResponse?.data;
   const estimatedCaloriesValue = extractEstimatedCalories(d as Record<string, unknown> | undefined);
+  const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
   const displayCalories =
     estimatedCaloriesValue != null && Number.isFinite(estimatedCaloriesValue)
-      ? Math.min(MAX_KCAL_PER_SERVING, capFoodCalories(input, estimatedCaloriesValue))
+      ? Math.min(MAX_KCAL_PER_SERVING, capFoodCalories(input, estimatedCaloriesValue, Number.isFinite(gramsNum) ? gramsNum : undefined))
       : null;
   const hasCalories = displayCalories != null;
   const showConfirm = hasCalories && pendingLog;
@@ -304,15 +388,29 @@ export default function DashboardPage() {
 
   const todayKey = localDateKey(new Date());
   const todayEntries = log.filter((e) => entryLocalDate(e.created_at) === todayKey);
-  const todayKcal = todayEntries.reduce((s, e) => s + e.estimated_calories, 0);
-  const todayMacros = todayEntries.reduce(
+  const todayKcal = todayEntries.reduce(
+    (s, e) => s + (Number.isFinite(e.estimated_calories) ? e.estimated_calories : 0),
+    0
+  );
+  const toNum = (x: unknown): number => {
+    const n = typeof x === "number" ? x : Number(x);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const todayMacrosRaw = todayEntries.reduce(
     (acc, e) => ({
-      protein_g: acc.protein_g + (e.macros?.protein_g ?? 0),
-      carbs_g: acc.carbs_g + (e.macros?.carbs_g ?? 0),
-      fat_g: acc.fat_g + (e.macros?.fat_g ?? 0),
+      protein_g: acc.protein_g + toNum(e.macros?.protein_g),
+      carbs_g: acc.carbs_g + toNum(e.macros?.carbs_g),
+      fat_g: acc.fat_g + toNum(e.macros?.fat_g),
     }),
     { protein_g: 0, carbs_g: 0, fat_g: 0 }
   );
+  const todayMacros = {
+    protein_g: toNum(todayMacrosRaw.protein_g),
+    carbs_g: toNum(todayMacrosRaw.carbs_g),
+    fat_g: toNum(todayMacrosRaw.fat_g),
+  };
+  const safeMacro = (n: number) => (Number.isFinite(n) ? Math.round(n) : 0);
+  const safeKcal = Number.isFinite(todayKcal) ? todayKcal : 0;
   const sevenDays = last7DaysCalories(log);
   const sevenDaysMacros = last7DaysMacros(log);
   const avg7DayKcal = sevenDays.length
@@ -366,18 +464,29 @@ export default function DashboardPage() {
 
       <nav className="sticky top-14 z-10 border-b border-border bg-surface2/90 backdrop-blur-sm">
         <div className="max-w-2xl mx-auto px-3 py-2">
-          <div className="flex gap-1 p-1 bg-surface3 rounded-xl">
-            {tabs.map(({ id, label }) => (
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1 p-1 bg-surface3 rounded-xl flex-1">
+              {tabs.map(({ id, label }) => (
+                <button
+                  key={id}
+                  onClick={() => setTab(id)}
+                  className={`flex-1 py-2.5 px-3 text-sm font-medium rounded-lg transition-all ${
+                    tab === id ? "bg-surface3 text-white shadow-sm" : "text-muted hover:text-gray-200"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {tab === "dashboard" && (
               <button
-                key={id}
-                onClick={() => setTab(id)}
-                className={`flex-1 py-2.5 px-3 text-sm font-medium rounded-lg transition-all ${
-                  tab === id ? "bg-surface3 text-white shadow-sm" : "text-muted hover:text-gray-200"
-                }`}
+                type="button"
+                onClick={() => document.getElementById("profile-for-calorie-estimate")?.scrollIntoView({ behavior: "smooth" })}
+                className="shrink-0 py-2 px-3 text-xs font-medium text-accent border border-accent/50 rounded-lg hover:bg-accent/10"
               >
-                {label}
+                Set your details
               </button>
-            ))}
+            )}
           </div>
         </div>
       </nav>
@@ -404,9 +513,118 @@ export default function DashboardPage() {
           <div className="space-y-8">
             <h2 className="text-base font-semibold text-white">Overview</h2>
 
+            <section id="profile-for-calorie-estimate" className="bg-surface2 border border-border rounded-xl shadow-sm p-5 border-accent/30">
+              <h3 className="text-sm font-medium text-accent uppercase tracking-wider mb-1">Your details for calorie estimate</h3>
+              <p className="text-muted text-xs mb-4">Enter age, activity, weight, height and goal below. We use this to set your daily calorie and protein targets.</p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Age</label>
+                  <input
+                    type="number"
+                    min={13}
+                    max={120}
+                    value={profileDraft.age}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!Number.isNaN(v)) setProfileDraft((p) => ({ ...p, age: Math.max(13, Math.min(120, v)) }));
+                    }}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Activity</label>
+                  <select
+                    value={profileDraft.activity_level}
+                    onChange={(e) => setProfileDraft((p) => ({ ...p, activity_level: e.target.value as ActivityLevel }))}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="sedentary">Sedentary</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="active">Active</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Weight (kg)</label>
+                  <input
+                    type="number"
+                    min={30}
+                    max={300}
+                    step={0.5}
+                    value={profileDraft.weight_kg}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v)) setProfileDraft((p) => ({ ...p, weight_kg: Math.max(30, Math.min(300, v)) }));
+                    }}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Height (cm)</label>
+                  <input
+                    type="number"
+                    min={100}
+                    max={250}
+                    value={profileDraft.height_cm}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!Number.isNaN(v)) setProfileDraft((p) => ({ ...p, height_cm: Math.max(100, Math.min(250, v)) }));
+                    }}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Goal</label>
+                  <select
+                    value={profileDraft.goal}
+                    onChange={(e) => setProfileDraft((p) => ({ ...p, goal: e.target.value as Goal }))}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="general_fitness">General fitness</option>
+                    <option value="fat_loss">Fat loss</option>
+                    <option value="muscle_gain">Muscle gain</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Gender</label>
+                  <select
+                    value={profileDraft.gender}
+                    onChange={(e) => setProfileDraft((p) => ({ ...p, gender: e.target.value as UserProfile["gender"] }))}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Equipment</label>
+                  <select
+                    value={profileDraft.equipment}
+                    onChange={(e) => setProfileDraft((p) => ({ ...p, equipment: e.target.value as Equipment }))}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="gym">Gym</option>
+                    <option value="home">Home</option>
+                    <option value="none">No equipment</option>
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={handleSaveProfile}
+                    className="w-full px-4 py-2.5 rounded-lg bg-accent text-black font-semibold text-sm hover:bg-accentDim"
+                  >
+                    {profileSaved ? "Saved" : "Save profile"}
+                  </button>
+                </div>
+              </div>
+              <p className="text-muted text-xs mt-3">Used for: daily calorie & protein targets (Food/Dashboard) and workout plans (Workout tab). Targets: {targets.kcal} kcal · {targets.protein_g}g protein · {targets.fat_g}g fat · {targets.carbs_g}g carbs</p>
+            </section>
+
             {!logLoading && todayEntries.length === 0 && total7DayKcal === 0 && (
               <section className="bg-surface2 border border-border rounded-xl shadow-sm p-6 text-center">
                 <p className="text-muted text-sm mb-4">Your dashboard will show your intake and trends here.</p>
+                <p className="text-accent/90 text-xs mb-4">↑ Set your age, activity, weight & goal in the section above for personalized calorie and protein targets.</p>
                 <div className="flex flex-wrap gap-3 justify-center">
                   <button type="button" onClick={() => setTab("log")} className="px-4 py-2.5 rounded-lg bg-accent text-black font-semibold text-sm hover:bg-accentDim">
                     Log your first meal
@@ -483,13 +701,13 @@ export default function DashboardPage() {
                         {day.calories || "—"}
                       </div>
                       <div className="bg-orange-500/95 text-[10px] text-center text-white py-1">
-                        {Math.round(day.protein_g) || "—"} P
+                        {Number.isFinite(day.protein_g) ? Math.round(day.protein_g) : "—"} P
                       </div>
                       <div className="bg-amber-400/95 text-[10px] text-center text-gray-900 py-1">
-                        {Math.round(day.fat_g) || "—"} F
+                        {Number.isFinite(day.fat_g) ? Math.round(day.fat_g) : "—"} F
                       </div>
                       <div className="bg-emerald-500/95 text-[10px] text-center text-white py-1">
-                        {Math.round(day.carbs_g) || "—"} C
+                        {Number.isFinite(day.carbs_g) ? Math.round(day.carbs_g) : "—"} C
                       </div>
                     </div>
                     <span className="text-[11px] text-muted text-center mt-1.5">
@@ -506,23 +724,23 @@ export default function DashboardPage() {
             <section className="grid grid-cols-2 gap-4">
               <div className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
                 <p className="text-muted text-xs uppercase tracking-wider mb-2">Today</p>
-                <p className="text-3xl font-bold text-white tabular-nums">{todayKcal}</p>
-                <p className="text-muted text-sm mt-0.5">of {TARGETS.kcal} kcal</p>
+                <p className="text-3xl font-bold text-white tabular-nums">{safeKcal}</p>
+                <p className="text-muted text-sm mt-0.5">of {targets.kcal} kcal</p>
                 <div className="mt-3 h-2 bg-surface3 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-accent rounded-full transition-all"
-                    style={{ width: `${Math.min(100, (todayKcal / TARGETS.kcal) * 100)}%` }}
+                    style={{ width: `${Math.min(100, (safeKcal / targets.kcal) * 100)}%` }}
                   />
                 </div>
               </div>
               <div className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
                 <p className="text-muted text-xs uppercase tracking-wider mb-2">Macros</p>
                 <p className="text-lg font-semibold text-white tabular-nums">
-                  {Math.round(todayMacros.protein_g)}
-                  <span className="text-muted font-normal text-sm"> / {TARGETS.protein_g}</span> P
+                  {safeMacro(todayMacros.protein_g)}
+                  <span className="text-muted font-normal text-sm"> / {targets.protein_g}</span> P
                 </p>
                 <p className="text-sm text-muted mt-1">
-                  {Math.round(todayMacros.fat_g)}F · {Math.round(todayMacros.carbs_g)}C
+                  {safeMacro(todayMacros.fat_g)}F · {safeMacro(todayMacros.carbs_g)}C
                 </p>
               </div>
             </section>
@@ -556,29 +774,29 @@ export default function DashboardPage() {
                 <div>
                   <p className="text-muted text-xs uppercase tracking-wider">Calories</p>
                   <p className="text-lg font-semibold text-white tabular-nums">
-                    {todayKcal}
-                    <span className="text-muted font-normal">/{TARGETS.kcal}</span>
+                    {safeKcal}
+                    <span className="text-muted font-normal">/{targets.kcal}</span>
                   </p>
                 </div>
                 <div>
                   <p className="text-muted text-xs uppercase tracking-wider">Protein</p>
                   <p className="text-lg font-semibold text-white tabular-nums">
-                    {Math.round(todayMacros.protein_g)}
-                    <span className="text-muted font-normal">/{TARGETS.protein_g}g</span>
+                    {safeMacro(todayMacros.protein_g)}
+                    <span className="text-muted font-normal">/{targets.protein_g}g</span>
                   </p>
                 </div>
                 <div>
                   <p className="text-muted text-xs uppercase tracking-wider">Fat</p>
                   <p className="text-lg font-semibold text-white tabular-nums">
-                    {Math.round(todayMacros.fat_g)}
-                    <span className="text-muted font-normal">/{TARGETS.fat_g}g</span>
+                    {safeMacro(todayMacros.fat_g)}
+                    <span className="text-muted font-normal">/{targets.fat_g}g</span>
                   </p>
                 </div>
                 <div>
                   <p className="text-muted text-xs uppercase tracking-wider">Carbs</p>
                   <p className="text-lg font-semibold text-white tabular-nums">
-                    {Math.round(todayMacros.carbs_g)}
-                    <span className="text-muted font-normal">/{TARGETS.carbs_g}g</span>
+                    {safeMacro(todayMacros.carbs_g)}
+                    <span className="text-muted font-normal">/{targets.carbs_g}g</span>
                   </p>
                 </div>
               </div>
@@ -671,7 +889,7 @@ export default function DashboardPage() {
                     disabled={saving}
                     onClick={async () => {
                       const rawCal = displayCalories ?? extractEstimatedCalories(d as Record<string, unknown>);
-                      const cal = rawCal != null ? capFoodCalories(input, rawCal) : null;
+                      const cal = rawCal != null ? capFoodCalories(input, rawCal, grams.trim() ? parseInt(grams.trim(), 10) : undefined) : null;
                       if (cal == null || !Number.isFinite(cal)) return;
                       const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
                       const entry = pendingLog ?? {
@@ -736,7 +954,7 @@ export default function DashboardPage() {
                   ))}
                 </ul>
               )}
-              {todayEntries.length > 0 && <p className="text-muted text-sm mt-3">Total ~{todayKcal} kcal</p>}
+              {todayEntries.length > 0 && <p className="text-muted text-sm mt-3">Total ~{safeKcal} kcal</p>}
             </section>
           </div>
         )}
@@ -824,15 +1042,15 @@ export default function DashboardPage() {
                       <>
                         <div className="bg-surface3 rounded-lg p-3 text-center">
                           <span className="text-muted text-xs block">Protein</span>
-                          <span className="font-semibold">{(d!.macros as Macros).protein_g}g</span>
+                          <span className="font-semibold">{formatMacroValue((d!.macros as Record<string, unknown>).protein_g)}</span>
                         </div>
                         <div className="bg-surface3 rounded-lg p-3 text-center">
                           <span className="text-muted text-xs block">Carbs</span>
-                          <span className="font-semibold">{(d!.macros as Macros).carbs_g}g</span>
+                          <span className="font-semibold">{formatMacroValue((d!.macros as Record<string, unknown>).carbs_g)}</span>
                         </div>
                         <div className="bg-surface3 rounded-lg p-3 text-center">
                           <span className="text-muted text-xs block">Fat</span>
-                          <span className="font-semibold">{(d!.macros as Macros).fat_g}g</span>
+                          <span className="font-semibold">{formatMacroValue((d!.macros as Record<string, unknown>).fat_g)}</span>
                         </div>
                       </>
                     ) : null}
@@ -848,23 +1066,9 @@ export default function DashboardPage() {
                   </button>
                 )}
                 {showWorkout ? (
-                  <div className="space-y-4 pt-2">
-                    {(d!.days as {
-                      day: string;
-                      warmup?: string;
-                      exercises?: Array<{ name: string; sets?: string; reps?: string }>;
-                    }[]).map((day, i) => (
-                      <div key={i} className="bg-surface3 rounded-lg p-4 border border-border">
-                        <div className="font-semibold text-accent mb-2">{day.day}</div>
-                        {day.warmup != null ? <p className="text-muted text-sm mb-2">Warm-up: {day.warmup}</p> : null}
-                        {day.exercises?.map((ex, j) => (
-                          <div key={j} className="text-sm text-gray-200 py-0.5">
-                            · {ex.name} {ex.sets != null ? `— ${ex.sets}` : ""} {ex.reps ?? ""}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
+                  <p className="text-accent/90 text-sm pt-2">
+                    Your plan is ready. Go to the <button type="button" onClick={() => setTab("workout")} className="underline font-medium">Workout</button> tab to see it.
+                  </p>
                 ) : null}
               </section>
             )}
@@ -875,75 +1079,20 @@ export default function DashboardPage() {
           <div className="space-y-8">
             <h2 className="text-base font-semibold text-white">Workout</h2>
             <p className="text-muted text-sm">
-              Your plan is tailored to your <strong className="text-gray-300">age</strong>, <strong className="text-gray-300">activity</strong>, <strong className="text-gray-300">goal</strong>, and <strong className="text-gray-300">equipment</strong> below. Set your profile, then generate or adjust (e.g. &quot;no gym tomorrow&quot;).
+              Your plan uses the same profile as your <strong className="text-gray-300">calorie & protein targets</strong> (age, activity, goal, equipment). Set or edit your details on the <strong className="text-gray-300">Dashboard</strong> tab, then generate your plan here.
             </p>
 
-            <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-4">
-              <h3 className="text-sm font-medium text-muted uppercase tracking-wider">Your profile</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1.5">Age</label>
-                  <input
-                    type="number"
-                    min={13}
-                    max={100}
-                    value={workoutAge}
-                    onChange={(e) => {
-                      const v = parseInt(e.target.value, 10);
-                      if (!Number.isNaN(v)) setWorkoutAge(Math.max(13, Math.min(100, v)));
-                    }}
-                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1.5">Activity</label>
-                  <select
-                    value={workoutActivity}
-                    onChange={(e) => setWorkoutActivity(e.target.value as UserContext["activity_level"])}
-                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
-                  >
-                    <option value="sedentary">Sedentary</option>
-                    <option value="moderate">Moderate</option>
-                    <option value="active">Active</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1.5">Gender</label>
-                  <select
-                    value={workoutGender}
-                    onChange={(e) => setWorkoutGender(e.target.value as UserContext["gender"])}
-                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
-                  >
-                    <option value="male">Male</option>
-                    <option value="female">Female</option>
-                    <option value="other">Other</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1.5">Goal</label>
-                  <select
-                    value={workoutGoal}
-                    onChange={(e) => setWorkoutGoal(e.target.value as UserContext["goal"])}
-                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
-                  >
-                    <option value="fat_loss">Fat loss</option>
-                    <option value="muscle_gain">Muscle gain</option>
-                    <option value="general_fitness">General fitness</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1.5">Equipment</label>
-                  <select
-                    value={workoutEquipment}
-                    onChange={(e) => setWorkoutEquipment(e.target.value as UserContext["equipment"])}
-                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
-                  >
-                    <option value="gym">Gym</option>
-                    <option value="home">Home</option>
-                    <option value="none">No equipment</option>
-                  </select>
-                </div>
-              </div>
+            <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
+              <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-2">Profile in use</h3>
+              <p className="text-muted text-xs mb-3">Age {activeProfile.age} · {activeProfile.activity_level} · {activeProfile.goal.replace("_", " ")} · {activeProfile.equipment}</p>
+              <p className="text-muted text-xs mb-3">Daily targets from this profile: {targets.kcal} kcal · {targets.protein_g}g protein</p>
+              <button
+                type="button"
+                onClick={() => { setTab("dashboard"); setTimeout(() => document.getElementById("profile-for-calorie-estimate")?.scrollIntoView({ behavior: "smooth" }), 100); }}
+                className="text-sm font-medium text-accent hover:underline"
+              >
+                Edit profile on Dashboard →
+              </button>
             </section>
 
             <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-4">
@@ -951,14 +1100,14 @@ export default function DashboardPage() {
               <div className="flex gap-3">
                 <input
                   type="text"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  value={workoutAdjustInput}
+                  onChange={(e) => setWorkoutAdjustInput(e.target.value)}
                   placeholder="e.g. I'm travelling tomorrow, no gym"
                   className="flex-1 px-4 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg placeholder:text-gray-400"
                 />
                 <button
                   onClick={handleAdjustPlan}
-                  disabled={loading || !input.trim()}
+                  disabled={loading || !workoutAdjustInput.trim()}
                   className="px-5 py-2.5 rounded-lg bg-surface3 border border-border text-gray-200 font-medium hover:border-accent/50 hover:text-accent disabled:opacity-50"
                 >
                   Adjust
