@@ -4,8 +4,11 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AromiRequest, AromiResponse, UserContext, FoodLogEntry, Macros } from "@/lib/types";
-import { loadLog, saveLogEntry, deleteLogEntry, last7DaysCalories, last7DaysMacros, dateKey } from "@/lib/storage";
+import { loadLog, saveLogEntry, deleteLogEntry, last7DaysCalories, last7DaysMacros, localDateKey, entryLocalDate } from "@/lib/storage";
 import { getUser, logout as logoutLocal } from "@/lib/auth";
+
+/** Max sane kcal per serving; above this we assume wrong unit or garbage. */
+const MAX_KCAL_PER_SERVING = 2000;
 
 function extractEstimatedCalories(data: Record<string, unknown> | undefined): number | null {
   if (!data) return null;
@@ -13,7 +16,14 @@ function extractEstimatedCalories(data: Record<string, unknown> | undefined): nu
   const tryNumber = (value: unknown): number | null => {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value === "string") {
-      const n = Number(value.replace(/[^\d.]/g, ""));
+      const s = value.trim();
+      const rangeMatch = s.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/);
+      if (rangeMatch) {
+        const low = Number(rangeMatch[1]);
+        const high = Number(rangeMatch[2]);
+        if (Number.isFinite(low) && Number.isFinite(high)) return Math.round((low + high) / 2);
+      }
+      const n = Number(s.replace(/[^\d.]/g, ""));
       return Number.isFinite(n) ? n : null;
     }
     return null;
@@ -22,29 +32,58 @@ function extractEstimatedCalories(data: Record<string, unknown> | undefined): nu
   const directKeys = ["estimated_calories", "calories", "kcal"] as const;
   for (const key of directKeys) {
     if (key in data) {
-      const n = tryNumber((data as Record<string, unknown>)[key]);
-      if (n != null) return n;
+      let n = tryNumber((data as Record<string, unknown>)[key]);
+      if (n != null) {
+        n = sanitizeCalories(n);
+        if (n != null) return n;
+      }
     }
   }
 
   const nested = (data as Record<string, unknown>).nutrition;
   if (nested && typeof nested === "object") {
     for (const key of directKeys) {
-      const n = tryNumber((nested as Record<string, unknown>)[key]);
-      if (n != null) return n;
+      let n = tryNumber((nested as Record<string, unknown>)[key]);
+      if (n != null) {
+        n = sanitizeCalories(n);
+        if (n != null) return n;
+      }
     }
   }
 
   return null;
 }
 
+/** Treat huge numbers as joules (convert to kcal) or cap garbage. */
+function sanitizeCalories(raw: number): number | null {
+  if (raw <= 0 || !Number.isFinite(raw)) return null;
+  // Likely in joules (e.g. 570720 J = ~136 kcal). 1 kcal ≈ 4184 J.
+  if (raw > MAX_KCAL_PER_SERVING && raw < 500_000) {
+    const asKcal = Math.round(raw / 4184);
+    return asKcal <= MAX_KCAL_PER_SERVING ? asKcal : MAX_KCAL_PER_SERVING;
+  }
+  if (raw > MAX_KCAL_PER_SERVING) return MAX_KCAL_PER_SERVING;
+  return Math.round(raw);
+}
+
+/** Cap obviously wrong estimates for common Indian breads (e.g. 2 chapati ~120–160 kcal). */
+function capChapatiRotiCalories(foodText: string, calories: number): number {
+  if (!/\b(chapati|chappati|roti|phulka|paratha)\b/i.test(foodText)) return calories;
+  const match = foodText.match(/(\d+)\s*(piece|pc|pcs|no|number)?/i) || foodText.match(/^(\d+)/);
+  const pieces = match ? Math.min(10, Math.max(1, parseInt(match[1], 10))) : 2;
+  const maxPerPiece = 90;
+  const capped = Math.min(calories, pieces * maxPerPiece);
+  return capped;
+}
+
 const DEFAULT_CONTEXT: UserContext = {
-  age: 21,
+  age: 25,
   height_cm: 175,
   weight_kg: 72,
   activity_level: "moderate",
   goal: "fat_loss",
   diet: "vegetarian",
+  gender: "other",
   health_conditions: [],
   injuries: [],
   equipment: "gym",
@@ -73,6 +112,19 @@ export default function DashboardPage() {
     macros?: Macros;
   } | null>(null);
 
+  // Workout profile (used to optimize plan)
+  const [workoutAge, setWorkoutAge] = useState<number>(25);
+  const [workoutActivity, setWorkoutActivity] = useState<UserContext["activity_level"]>("moderate");
+  const [workoutGender, setWorkoutGender] = useState<UserContext["gender"]>("other");
+  const [workoutGoal, setWorkoutGoal] = useState<UserContext["goal"]>("general_fitness");
+  const [workoutEquipment, setWorkoutEquipment] = useState<UserContext["equipment"]>("gym");
+
+  // Log loading & feedback
+  const [logLoading, setLogLoading] = useState(true);
+  const [logLoadError, setLogLoadError] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<"added" | "error" | null>(null);
+  const [saving, setSaving] = useState(false);
+
   // Auth guard
   useEffect(() => {
     const u = getUser();
@@ -83,18 +135,56 @@ export default function DashboardPage() {
     setUserEmail(u.email);
   }, [router]);
 
-  useEffect(() => {
-    loadLog().then((logs) => {
+  const refetchLog = useCallback(() => {
+    setLogLoading(true);
+    setLogLoadError(false);
+    loadLog().then(({ logs, error }) => {
       setLog(logs);
+      setLogLoadError(error ?? false);
+      setLogLoading(false);
     });
   }, []);
 
+  useEffect(() => {
+    refetchLog();
+  }, [refetchLog]);
+
+
+  useEffect(() => {
+    if (saveFeedback == null) return;
+    const t = setTimeout(() => setSaveFeedback(null), 3000);
+    return () => clearTimeout(t);
+  }, [saveFeedback]);
+
   const addToLog = useCallback(async (entry: Omit<FoodLogEntry, "id" | "created_at">) => {
-    const saved = await saveLogEntry(entry);
-    if (saved) {
-      setLog((prev) => [saved, ...prev]);
+    const cal = entry.estimated_calories;
+    const safeCal =
+      typeof cal === "number" && Number.isFinite(cal) && cal > 0 && cal <= MAX_KCAL_PER_SERVING
+        ? Math.round(cal)
+        : typeof cal === "number" && Number.isFinite(cal) && cal > 0
+          ? Math.min(MAX_KCAL_PER_SERVING, Math.round(cal))
+          : null;
+    if (safeCal == null) {
+      setSaveFeedback("error");
+      return;
     }
-  }, []);
+    const safeEntry = { ...entry, estimated_calories: safeCal };
+    const tempId = crypto.randomUUID();
+    const tempCreated = new Date().toISOString();
+    const optimistic: FoodLogEntry = { ...safeEntry, id: tempId, created_at: tempCreated };
+    setLog((prev) => [optimistic, ...prev]);
+    setSaving(true);
+    setSaveFeedback(null);
+    const saved = await saveLogEntry(safeEntry);
+    setSaving(false);
+    if (saved) {
+      setLog((prev) => prev.map((e) => (e.id === tempId ? saved : e)));
+      setSaveFeedback("added");
+      refetchLog();
+    } else {
+      setSaveFeedback("error");
+    }
+  }, [refetchLog]);
 
   const removeFromLog = useCallback(async (id: string) => {
     const deleted = await deleteLogEntry(id);
@@ -133,10 +223,11 @@ export default function DashboardPage() {
         const cal = extractEstimatedCalories(data.data as Record<string, unknown> | undefined);
         if (cal != null && Number.isFinite(cal) && (intent === "food_estimation" || intent === "food_log")) {
           const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
+          const cappedCal = capChapatiRotiCalories(intent === "food_estimation" || intent === "food_log" ? input : "", cal);
           setPendingLog({
             food_text: (intent === "food_estimation" || intent === "food_log" ? input : "") || "Logged food",
             meal_type: mealType,
-            estimated_calories: cal,
+            estimated_calories: cappedCal,
             grams: gramsNum != null && !Number.isNaN(gramsNum) ? gramsNum : undefined,
             confidence_range: data.data?.confidence_range as string | undefined,
             macros: data.data?.macros as Macros | undefined,
@@ -174,24 +265,40 @@ export default function DashboardPage() {
     setGrams("");
   }, [pendingLog, addToLog]);
 
+  const workoutContext = useCallback(
+    (): UserContext => ({
+      ...DEFAULT_CONTEXT,
+      age: workoutAge,
+      activity_level: workoutActivity,
+      gender: workoutGender,
+      goal: workoutGoal,
+      equipment: workoutEquipment,
+    }),
+    [workoutAge, workoutActivity, workoutGender, workoutGoal, workoutEquipment]
+  );
+
   const handleGenerateWorkout = useCallback(() => {
     setInput("");
-    send("workout_plan");
-  }, [send]);
+    send("workout_plan", { user_context: workoutContext() });
+  }, [send, workoutContext]);
 
   const handleAdjustPlan = useCallback(() => {
     if (!input.trim()) return;
-    send("adjust_plan");
-  }, [input, send]);
+    send("adjust_plan", { user_context: workoutContext() });
+  }, [input, send, workoutContext]);
 
   const d = lastResponse?.data;
   const estimatedCaloriesValue = extractEstimatedCalories(d as Record<string, unknown> | undefined);
-  const hasCalories = estimatedCaloriesValue != null && !Number.isNaN(estimatedCaloriesValue);
+  const displayCalories =
+    estimatedCaloriesValue != null && Number.isFinite(estimatedCaloriesValue)
+      ? Math.min(MAX_KCAL_PER_SERVING, capChapatiRotiCalories(input, estimatedCaloriesValue))
+      : null;
+  const hasCalories = displayCalories != null;
   const showConfirm = hasCalories && pendingLog;
   const showWorkout = lastResponse?.ui_hint === "show_workout" && d?.days != null;
 
-  const todayKey = dateKey(new Date());
-  const todayEntries = log.filter((e) => e.created_at.startsWith(todayKey));
+  const todayKey = localDateKey(new Date());
+  const todayEntries = log.filter((e) => entryLocalDate(e.created_at) === todayKey);
   const todayKcal = todayEntries.reduce((s, e) => s + e.estimated_calories, 0);
   const todayMacros = todayEntries.reduce(
     (acc, e) => ({
@@ -271,14 +378,51 @@ export default function DashboardPage() {
       </nav>
 
       <main className="flex-1 w-full max-w-2xl mx-auto px-4 py-6 pb-10 flex flex-col gap-8">
+        {logLoadError && (
+          <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            Couldn&apos;t load your log. <button type="button" onClick={refetchLog} className="underline font-medium">Try again</button>
+          </div>
+        )}
+
+        {saveFeedback === "added" && (
+          <div className="rounded-xl border border-emerald-500/50 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+            Added to log.
+          </div>
+        )}
+        {saveFeedback === "error" && (
+          <div className="rounded-xl border border-red-500/50 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            Couldn&apos;t save. Check your connection and try again.
+          </div>
+        )}
+
         {tab === "dashboard" && (
           <div className="space-y-8">
             <h2 className="text-base font-semibold text-white">Overview</h2>
 
+            {!logLoading && todayEntries.length === 0 && total7DayKcal === 0 && (
+              <section className="bg-surface2 border border-border rounded-xl shadow-sm p-6 text-center">
+                <p className="text-muted text-sm mb-4">Your dashboard will show your intake and trends here.</p>
+                <div className="flex flex-wrap gap-3 justify-center">
+                  <button type="button" onClick={() => setTab("log")} className="px-4 py-2.5 rounded-lg bg-accent text-black font-semibold text-sm hover:bg-accentDim">
+                    Log your first meal
+                  </button>
+                  <button type="button" onClick={refetchLog} disabled={logLoading} className="px-4 py-2.5 rounded-lg bg-surface3 border border-border text-gray-200 text-sm font-medium hover:border-accent/50 hover:text-accent disabled:opacity-50">
+                    Refresh
+                  </button>
+                </div>
+                <p className="text-muted text-xs mt-4">If you added food but don&apos;t see it, try Refresh or log out and log back in.</p>
+              </section>
+            )}
+
             <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
-              <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-4">Intake last 7 days</h3>
-              <div className="h-32 w-full">
-                {sevenDays.length > 0 && (() => {
+              <div className="flex items-center justify-between gap-2 mb-4">
+                <h3 className="text-sm font-medium text-muted uppercase tracking-wider">Intake last 7 days</h3>
+                <button type="button" onClick={refetchLog} disabled={logLoading} className="text-xs text-muted hover:text-accent disabled:opacity-50 shrink-0">Refresh</button>
+              </div>
+              <div className="h-32 w-full min-h-[8rem] flex items-center justify-center">
+                {total7DayKcal === 0 ? (
+                  <p className="text-muted text-sm text-center px-4">Log food in the Food tab to see your trend here.</p>
+                ) : sevenDays.length > 0 ? (() => {
                   const w = 280;
                   const h = 96;
                   const pad = { t: 4, r: 8, b: 20, l: 32 };
@@ -312,7 +456,7 @@ export default function DashboardPage() {
                       ))}
                     </svg>
                   );
-                })()}
+                })() : null}
               </div>
               <div className="flex justify-between items-center mt-4 pt-4 border-t border-border">
                 <span className="text-muted text-sm">Total</span>
@@ -380,7 +524,9 @@ export default function DashboardPage() {
 
             <section>
               <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-3">Recent</h3>
-              {todayEntries.length === 0 ? (
+              {logLoading ? (
+                <p className="text-muted text-sm py-4 text-center">Loading…</p>
+              ) : todayEntries.length === 0 ? (
                 <p className="text-muted text-sm py-4 text-center">No food logged today. Go to Food to log.</p>
               ) : (
                 <ul className="bg-surface2 border border-border rounded-xl shadow-sm divide-y divide-border overflow-hidden">
@@ -514,15 +660,21 @@ export default function DashboardPage() {
               {lastResponse && tab === "log" && hasCalories && (
                 <div className="mt-4 p-4 bg-surface3 rounded-lg border border-border">
                   <p className="text-gray-200 text-sm">{lastResponse.message}</p>
-                  <p className="text-accent font-semibold mt-2">~{estimatedCaloriesValue} kcal</p>
+                  <p className="text-accent font-semibold mt-2">
+                    {displayCalories != null && Number.isFinite(displayCalories) ? `~${displayCalories} kcal` : "—"}
+                  </p>
+                  <p className="text-muted text-xs mt-1">Click below to add this to today&apos;s log and update your dashboard.</p>
                   <button
+                    disabled={saving}
                     onClick={async () => {
-                      const cal = estimatedCaloriesValue ?? Number(d!.estimated_calories);
+                      const rawCal = displayCalories ?? extractEstimatedCalories(d as Record<string, unknown>);
+                      const cal = rawCal != null && Number.isFinite(rawCal) ? capChapatiRotiCalories(input, rawCal) : null;
+                      if (cal == null || !Number.isFinite(cal) || cal <= 0) return;
                       const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
                       const entry = pendingLog ?? {
                         food_text: input,
                         meal_type: mealType,
-                        estimated_calories: cal,
+                        estimated_calories: Math.min(MAX_KCAL_PER_SERVING, Math.round(cal)),
                         grams: gramsNum != null && !Number.isNaN(gramsNum) ? gramsNum : undefined,
                         confidence_range: d!.confidence_range as string | undefined,
                         macros: d!.macros as Macros | undefined,
@@ -540,9 +692,9 @@ export default function DashboardPage() {
                       setInput("");
                       setGrams("");
                     }}
-                    className="mt-3 w-full py-2.5 rounded-lg bg-accent text-black font-semibold text-sm hover:bg-accentDim"
+                    className="mt-3 w-full py-2.5 rounded-lg bg-accent text-black font-semibold text-sm hover:bg-accentDim disabled:opacity-50"
                   >
-                    Add to log
+                    {saving ? "Adding…" : "Add to log"}
                   </button>
                 </div>
               )}
@@ -550,7 +702,9 @@ export default function DashboardPage() {
 
             <section>
               <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-3">Today&apos;s log</h3>
-              {todayEntries.length === 0 ? (
+              {logLoading ? (
+                <p className="text-muted text-sm py-6 text-center bg-surface2 border border-border rounded-xl shadow-sm">Loading…</p>
+              ) : todayEntries.length === 0 ? (
                 <p className="text-muted text-sm py-6 text-center bg-surface2 border border-border rounded-xl shadow-sm">
                   No entries yet. Log food above.
                 </p>
@@ -588,7 +742,7 @@ export default function DashboardPage() {
           <div className="space-y-8">
             <h2 className="text-base font-semibold text-white">AROMI</h2>
             <p className="text-muted text-sm">
-              Estimate food, log it, get workouts, or ask to adjust (e.g. &quot;no gym tomorrow&quot;).
+              AROMI is your AI coach: estimate food, log it, get workouts, or ask to adjust (e.g. &quot;no gym tomorrow&quot;).
             </p>
 
             <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
@@ -652,13 +806,15 @@ export default function DashboardPage() {
             {lastResponse && (
               <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-4">
                 <p className="text-white">{lastResponse.message}</p>
-                {hasCalories && (
+                {(hasCalories || lastResponse?.data) && (
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div className="bg-surface3 rounded-lg p-3 text-center">
                       <span className="text-muted text-xs block">Calories</span>
-                      <span className="text-accent font-semibold text-lg">{Number(d!.estimated_calories)}</span>
-                      {d!.confidence_range != null ? (
-                        <span className="text-muted text-xs ml-1">{String(d!.confidence_range)}</span>
+                      <span className="text-accent font-semibold text-lg">
+                        {displayCalories != null && Number.isFinite(displayCalories) ? `~${displayCalories}` : "—"}
+                      </span>
+                      {d?.confidence_range != null ? (
+                        <span className="text-muted text-xs ml-1">{String(d.confidence_range)}</span>
                       ) : null}
                     </div>
                     {d!.macros != null ? (
@@ -681,10 +837,11 @@ export default function DashboardPage() {
                 )}
                 {showConfirm && (
                   <button
+                    disabled={saving}
                     onClick={handleConfirmLog}
-                    className="w-full py-2.5 rounded-lg bg-accent text-black font-semibold hover:bg-accentDim"
+                    className="w-full py-2.5 rounded-lg bg-accent text-black font-semibold hover:bg-accentDim disabled:opacity-50"
                   >
-                    Add to log
+                    {saving ? "Adding…" : "Add to log"}
                   </button>
                 )}
                 {showWorkout ? (
@@ -715,10 +872,79 @@ export default function DashboardPage() {
           <div className="space-y-8">
             <h2 className="text-base font-semibold text-white">Workout</h2>
             <p className="text-muted text-sm">
-              Generate a plan or describe a change (e.g. &quot;no gym tomorrow&quot;) and click Adjust.
+              Set your profile so we can optimize your plan. Then generate or adjust (e.g. &quot;no gym tomorrow&quot;).
             </p>
 
             <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-4">
+              <h3 className="text-sm font-medium text-muted uppercase tracking-wider">Your profile</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Age</label>
+                  <input
+                    type="number"
+                    min={13}
+                    max={100}
+                    value={workoutAge}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!Number.isNaN(v)) setWorkoutAge(Math.max(13, Math.min(100, v)));
+                    }}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Activity</label>
+                  <select
+                    value={workoutActivity}
+                    onChange={(e) => setWorkoutActivity(e.target.value as UserContext["activity_level"])}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="sedentary">Sedentary</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="active">Active</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Gender</label>
+                  <select
+                    value={workoutGender}
+                    onChange={(e) => setWorkoutGender(e.target.value as UserContext["gender"])}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Goal</label>
+                  <select
+                    value={workoutGoal}
+                    onChange={(e) => setWorkoutGoal(e.target.value as UserContext["goal"])}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="fat_loss">Fat loss</option>
+                    <option value="muscle_gain">Muscle gain</option>
+                    <option value="general_fitness">General fitness</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1.5">Equipment</label>
+                  <select
+                    value={workoutEquipment}
+                    onChange={(e) => setWorkoutEquipment(e.target.value as UserContext["equipment"])}
+                    className="w-full px-3 py-2.5 text-sm text-white bg-surface3 border border-border rounded-lg"
+                  >
+                    <option value="gym">Gym</option>
+                    <option value="home">Home</option>
+                    <option value="none">No equipment</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-4">
+              <h3 className="text-sm font-medium text-muted uppercase tracking-wider">Generate or adjust</h3>
               <div className="flex gap-3">
                 <input
                   type="text"
@@ -749,18 +975,34 @@ export default function DashboardPage() {
                 <h3 className="text-sm font-medium text-muted uppercase tracking-wider">Your plan</h3>
                 {(d.days as {
                   day: string;
+                  focus?: string;
                   warmup?: string;
                   exercises?: Array<{ name: string; sets?: string; reps?: string }>;
                 }[]).map((day, i) => (
-                  <div key={i} className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
-                    <div className="font-semibold text-accent mb-2">{day.day}</div>
-                    {day.warmup != null ? <p className="text-muted text-sm mb-3">Warm-up: {day.warmup}</p> : null}
-                    <ul className="space-y-1.5">
-                      {day.exercises?.map((ex, j) => (
-                        <li key={j} className="text-gray-200 text-sm">
-                          · {ex.name} {ex.sets != null ? `— ${ex.sets}` : ""} {ex.reps ?? ""}
-                        </li>
-                      ))}
+                  <div key={i} className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-3">
+                    <div>
+                      <div className="font-semibold text-accent">{day.day}</div>
+                      {day.focus != null && day.focus.trim() !== "" ? (
+                        <div className="text-muted text-sm mt-0.5">{day.focus}</div>
+                      ) : null}
+                    </div>
+                    {day.warmup != null && day.warmup.trim() !== "" ? (
+                      <p className="text-muted text-sm">Warm-up: {day.warmup}</p>
+                    ) : null}
+                    <ul className="space-y-2">
+                      {day.exercises?.map((ex, j) => {
+                        const sets = ex.sets?.trim();
+                        const reps = ex.reps?.trim();
+                        const setsReps =
+                          sets && reps ? `${sets} × ${reps}` : sets || reps || "";
+                        return (
+                          <li key={j} className="text-gray-200 text-sm flex items-baseline gap-2">
+                            <span className="text-accent/80 shrink-0">·</span>
+                            <span className="font-medium text-white">{ex.name}</span>
+                            {setsReps ? <span className="text-muted">{setsReps}</span> : null}
+                          </li>
+                        );
+                      })}
                     </ul>
                   </div>
                 ))}

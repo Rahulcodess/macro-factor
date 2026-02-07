@@ -21,10 +21,10 @@ export default function LandingPage() {
               Login
             </Link>
             <Link
-              href="/dashboard"
+              href="/login?next=/dashboard"
               className="hidden sm:inline px-3 py-2 rounded-lg bg-accent text-black text-sm font-semibold hover:bg-accentDim"
             >
-              Go to dashboard
+              Get started
             </Link>
           </div>
         </div>
@@ -55,10 +55,10 @@ export default function LandingPage() {
                 Login
               </Link>
               <Link
-                href="/dashboard"
+                href="/login?next=/dashboard"
                 className="px-5 py-2.5 rounded-lg bg-surface3 border border-border text-gray-200 text-sm font-medium hover:border-accent/60 hover:text-accent"
               >
-                Open dashboard
+                Get started
               </Link>
             </div>
             <ul className="mt-4 space-y-1 text-xs text-muted">

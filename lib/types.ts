@@ -9,6 +9,7 @@ export type UserContext = {
   activity_level: "sedentary" | "moderate" | "active";
   goal: "fat_loss" | "muscle_gain" | "general_fitness";
   diet: "vegetarian" | "vegan" | "non-vegetarian";
+  gender: "male" | "female" | "other";
   health_conditions: string[];
   injuries: string[];
   equipment: "home" | "gym" | "none";

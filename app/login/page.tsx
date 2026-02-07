@@ -55,7 +55,7 @@ function LoginInner() {
                 setError(res.error);
                 return;
               }
-              router.push(next);
+              router.replace(next);
             } catch (err) {
               setError("Something went wrong. Please try again.");
             } finally {

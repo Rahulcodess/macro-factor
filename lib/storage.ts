@@ -1,21 +1,21 @@
 import type { FoodLogEntry } from "./types";
 
-export async function loadLog(): Promise<FoodLogEntry[]> {
-  if (typeof window === "undefined") return [];
+export type LoadLogResult = { logs: FoodLogEntry[]; error?: boolean };
+
+export async function loadLog(): Promise<LoadLogResult> {
+  if (typeof window === "undefined") return { logs: [] };
   try {
     const user = getUser();
-    if (!user?.id) return [];
+    if (!user?.id) return { logs: [] };
 
     const res = await fetch("/api/food-logs", {
-      headers: {
-        Authorization: `Bearer ${user.id}`,
-      },
+      headers: { Authorization: `Bearer ${user.id}` },
     });
-
     const data = await res.json();
-    return Array.isArray(data.logs) ? data.logs : [];
+    const logs = Array.isArray(data.logs) ? data.logs : [];
+    return res.ok ? { logs } : { logs, error: true };
   } catch {
-    return [];
+    return { logs: [], error: true };
   }
 }
 
@@ -72,29 +72,42 @@ function getUser() {
   }
 }
 
-/** Get YYYY-MM-DD for a date */
+/** Get YYYY-MM-DD in UTC (for storage/API) */
 export function dateKey(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** Get YYYY-MM-DD in local time (for "today" and charts so they match user's day) */
+export function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Get local date string from an ISO timestamp */
+export function entryLocalDate(createdAt: string): string {
+  return localDateKey(new Date(createdAt));
+}
+
 export type DayMacros = { date: string; calories: number; protein_g: number; carbs_g: number; fat_g: number };
 
-/** Calories per day for the last 7 days (including today) */
+/** Calories per day for the last 7 days (including today), using local dates */
 export function last7DaysCalories(log: FoodLogEntry[]): { date: string; calories: number }[] {
   return last7DaysMacros(log).map(({ date, calories }) => ({ date, calories }));
 }
 
-/** Full macros per day for the last 7 days */
+/** Full macros per day for the last 7 days, grouped by local date */
 export function last7DaysMacros(log: FoodLogEntry[]): DayMacros[] {
   const byDay: Record<string, DayMacros> = {};
   for (let i = 6; i >= 0; i--) {
     const d = new Date();
     d.setDate(d.getDate() - i);
-    const key = dateKey(d);
+    const key = localDateKey(d);
     byDay[key] = { date: key, calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0 };
   }
   for (const e of log) {
-    const day = e.created_at.slice(0, 10);
+    const day = entryLocalDate(e.created_at);
     if (byDay[day]) {
       byDay[day].calories += e.estimated_calories;
       byDay[day].protein_g += e.macros?.protein_g ?? 0;
