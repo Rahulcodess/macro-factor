@@ -1,63 +1,80 @@
 # Macrofactor
 
-One app for logging food, seeing calories/macros, and getting workout plans. The AI bit is called AROMI—same brain for estimates, logging, and routines. You type what you ate (e.g. "2 rotis, paneer butter masala"), get a rough calorie estimate, then add it to your log. Dashboard shows today and the last 7 days. Workouts are generated from your age, activity, and equipment; you can say things like "no gym tomorrow" and get a tweaked plan.
+Fitness app with an AI coach (we call it AROMI) that handles food estimates, logging, and workout plans in one place. You type what you ate, get rough calories and macros, and can generate routines based on your age, activity level, and equipment. No fake precision—we use free nutrition data and show ranges where it makes sense.
 
-No fake precision: we use free nutrition data and show ranges where it makes sense. Dark UI, works on mobile.
+Started as a hackathon project; the codebase is set up so you can actually run and extend it without fighting a ton of infra.
 
 ---
 
-## What’s in the app
+## What you can do
 
-**Food** — Meal + food text + optional grams. Hit "Log foods" to get an estimate, then "Add to log" to save it. Your dashboard and 7-day stats update from this. If nothing shows up after adding, hit Refresh or log out and back in (and make sure `DATABASE_URL` is set in your deploy).
+**Food** — Enter stuff like "2 rotis, paneer butter masala" or "eggs 100g". AROMI pulls from Open Food Facts when it can and uses the model for the rest. You get an estimate, then you choose whether to add it to your log. Indian food and free-text work fine.
 
-**Dashboard** — Intake last 7 days (line chart), daily P/F/C bars, and today’s total. Empty state has a "Log your first meal" and a Refresh button.
+**Dashboard** — Your last 7 days as a simple calorie line, plus a day-by-day macro breakdown (protein, carbs, fat). Today’s total and a short recent list so you can see how the day is going.
 
-**Workouts** — Set age, activity, gender, goal, equipment. "Generate workout plan" gives a 4–5 day plan with warm-up and exercises. The "Adjust" box is for stuff like "travelling, no gym".
+**Workouts** — You set age, activity (sedentary / moderate / active), and gender. Hit “Generate workout plan” and you get a 3–5 day plan with warm-ups and exercises. There’s an “Adjust” box if you want to say things like “no gym tomorrow” and get a tweaked plan.
 
-**AROMI** — Same AI in a chat-style tab: estimate food, add to log, or general chat. One API, one prompt, different intents.
+**AROMI tab** — Same AI: estimate food, add to log, or just chat. One endpoint, one prompt, different intents.
+
+UI is dark, mobile-friendly, and inspired by apps like MacroFactor. Nothing fancy, but it’s coherent and usable.
 
 ---
 
 ## Stack
 
-Next.js (App Router), React, TypeScript, Tailwind. Groq (Llama 3.3 70B) for AROMI. Open Food Facts when we can. Postgres (Neon or any) for users and food logs.
+- Next.js (App Router), React, TypeScript, Tailwind
+- Groq (Llama 3.3 70B) for the AI
+- Open Food Facts for nutrition (no key)
+- PostgreSQL for users and food logs (we use Neon; any Postgres works)
 
 ---
 
-## Run locally
+## Run it locally
+
+Clone, then:
 
 ```bash
 npm install
 cp .env.example .env
 ```
 
-`.env` needs:
+In `.env` you need:
 
-- `GROQ_API_KEY` — from [Groq Console](https://console.groq.com)
-- `DATABASE_URL` — Postgres URL (e.g. Neon, Supabase)
+- `GROQ_API_KEY` — free at [Groq Console](https://console.groq.com)
+- `DATABASE_URL` — Postgres connection string (e.g. from Neon or Supabase)
 
-Create the schema once:
+Create the DB schema once:
 
 ```bash
 node scripts/init-db.js
 ```
 
-(or run `schema.sql` with `psql`). Then:
+(or run `schema.sql` yourself if you have `psql`).
+
+Then:
 
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`. "Get started" → login (any email, password 4+ chars) → dashboard. New users are created in Postgres on first login.
+Open `http://localhost:3000`. You’ll land on the homepage; “Get started” takes you to login, then the dashboard. Sign in with any email (and a password of 4+ chars); the app will create the user in Postgres if needed.
 
 ---
 
-## Deploy (Vercel)
+## Deploy (e.g. Vercel)
 
-Connect the repo in Vercel and set `GROQ_API_KEY` and `DATABASE_URL` in project env. Build and deploy. If the dashboard stays at zero after logging food, check that `DATABASE_URL` is set and that the DB allows connections from Vercel.
+Push to GitHub, hook the repo up in Vercel, and set `GROQ_API_KEY` and `DATABASE_URL` in the project env. Build should just work. Make sure your DB allows connections from Vercel (Neon/Supabase do by default). There’s a `DEPLOYMENT.md` in the repo if you want a bit more detail.
 
 ---
 
-## For devs
+## DB and API (for devs)
 
-Tables: `users`, `food_logs`, `workout_plans` (see `schema.sql`). AROMI: POST `/api/aromi` with `intent`, optional `food_text`, `meal_type`, `grams`, `user_context`. Food logs: Bearer token (user id) in `Authorization`; APIs under `app/api/auth/*` and `app/api/food-logs`. No password hashing yet—next step for production would be bcrypt + proper sessions and rate-limiting the AI route.
+Tables: `users`, `food_logs`, `workout_plans`. See `schema.sql`.
+
+AROMI is a single POST to `/api/aromi` with a JSON body: `intent` (e.g. `food_estimation`, `workout_plan`), optional `food_text`, `meal_type`, `grams`, and `user_context`. The backend can inject Open Food Facts data into the prompt when it’s a food query, then returns JSON the UI knows how to render. Auth for food logs is Bearer token (user id from login); login and food-logs APIs are in `app/api/auth/*` and `app/api/food-logs`.
+
+---
+
+## If you want to go further
+
+Right now there’s no password hashing (we accept any email + short password and create/find the user). Adding bcrypt and proper sessions would be the next step for “real” auth. Same idea: rate-limit the AI route, add migrations (e.g. Prisma/Drizzle) if the schema grows. For a demo or a side project, the current setup is enough to use and ship.

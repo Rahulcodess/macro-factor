@@ -157,25 +157,13 @@ export default function DashboardPage() {
   }, [saveFeedback]);
 
   const addToLog = useCallback(async (entry: Omit<FoodLogEntry, "id" | "created_at">) => {
-    const cal = entry.estimated_calories;
-    const safeCal =
-      typeof cal === "number" && Number.isFinite(cal) && cal > 0 && cal <= MAX_KCAL_PER_SERVING
-        ? Math.round(cal)
-        : typeof cal === "number" && Number.isFinite(cal) && cal > 0
-          ? Math.min(MAX_KCAL_PER_SERVING, Math.round(cal))
-          : null;
-    if (safeCal == null) {
-      setSaveFeedback("error");
-      return;
-    }
-    const safeEntry = { ...entry, estimated_calories: safeCal };
     const tempId = crypto.randomUUID();
     const tempCreated = new Date().toISOString();
-    const optimistic: FoodLogEntry = { ...safeEntry, id: tempId, created_at: tempCreated };
+    const optimistic: FoodLogEntry = { ...entry, id: tempId, created_at: tempCreated };
     setLog((prev) => [optimistic, ...prev]);
     setSaving(true);
     setSaveFeedback(null);
-    const saved = await saveLogEntry(safeEntry);
+    const saved = await saveLogEntry(entry);
     setSaving(false);
     if (saved) {
       setLog((prev) => prev.map((e) => (e.id === tempId ? saved : e)));
@@ -608,6 +596,7 @@ export default function DashboardPage() {
 
             <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5">
               <h3 className="text-sm font-medium text-muted uppercase tracking-wider mb-4">Log food</h3>
+              <p className="text-muted text-xs mb-4">Enter food and grams, click <strong className="text-gray-300">Log foods</strong> to estimate. Then click <strong className="text-gray-300">Add to log</strong> to save and update your dashboard.</p>
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-medium text-muted mb-1.5">Meal</label>
@@ -660,21 +649,18 @@ export default function DashboardPage() {
               {lastResponse && tab === "log" && hasCalories && (
                 <div className="mt-4 p-4 bg-surface3 rounded-lg border border-border">
                   <p className="text-gray-200 text-sm">{lastResponse.message}</p>
-                  <p className="text-accent font-semibold mt-2">
-                    {displayCalories != null && Number.isFinite(displayCalories) ? `~${displayCalories} kcal` : "—"}
-                  </p>
-                  <p className="text-muted text-xs mt-1">Click below to add this to today&apos;s log and update your dashboard.</p>
-                  <button
+                  <p className="text-accent font-semibold mt-2">~{displayCalories} kcal</p>
+                    <button
                     disabled={saving}
                     onClick={async () => {
                       const rawCal = displayCalories ?? extractEstimatedCalories(d as Record<string, unknown>);
-                      const cal = rawCal != null && Number.isFinite(rawCal) ? capChapatiRotiCalories(input, rawCal) : null;
-                      if (cal == null || !Number.isFinite(cal) || cal <= 0) return;
+                      const cal = rawCal != null ? capChapatiRotiCalories(input, rawCal) : null;
+                      if (cal == null || !Number.isFinite(cal)) return;
                       const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
                       const entry = pendingLog ?? {
                         food_text: input,
                         meal_type: mealType,
-                        estimated_calories: Math.min(MAX_KCAL_PER_SERVING, Math.round(cal)),
+                        estimated_calories: cal,
                         grams: gramsNum != null && !Number.isNaN(gramsNum) ? gramsNum : undefined,
                         confidence_range: d!.confidence_range as string | undefined,
                         macros: d!.macros as Macros | undefined,
@@ -811,7 +797,7 @@ export default function DashboardPage() {
                     <div className="bg-surface3 rounded-lg p-3 text-center">
                       <span className="text-muted text-xs block">Calories</span>
                       <span className="text-accent font-semibold text-lg">
-                        {displayCalories != null && Number.isFinite(displayCalories) ? `~${displayCalories}` : "—"}
+                        {displayCalories != null ? `~${displayCalories}` : "—"}
                       </span>
                       {d?.confidence_range != null ? (
                         <span className="text-muted text-xs ml-1">{String(d.confidence_range)}</span>
@@ -872,7 +858,7 @@ export default function DashboardPage() {
           <div className="space-y-8">
             <h2 className="text-base font-semibold text-white">Workout</h2>
             <p className="text-muted text-sm">
-              Set your profile so we can optimize your plan. Then generate or adjust (e.g. &quot;no gym tomorrow&quot;).
+              Your plan is tailored to your <strong className="text-gray-300">age</strong>, <strong className="text-gray-300">activity</strong>, <strong className="text-gray-300">goal</strong>, and <strong className="text-gray-300">equipment</strong> below. Set your profile, then generate or adjust (e.g. &quot;no gym tomorrow&quot;).
             </p>
 
             <section className="bg-surface2 border border-border rounded-xl shadow-sm p-5 space-y-4">
