@@ -6,6 +6,7 @@
 
 const NUTRITION_URL = "https://api.calorieninjas.com/v1/nutrition";
 const MAX_QUERY_LENGTH = 1500;
+const REQUEST_TIMEOUT_MS = 6000;
 
 export type CalorieNinjasItem = {
   name: string;
@@ -26,6 +27,7 @@ export type CalorieNinjasResult = {
   items: CalorieNinjasItem[];
 };
 
+/** Read API key from env only. Never log or send this value to the client. */
 function getApiKey(): string | undefined {
   return process.env.CALORIE_NINJAS_API_KEY?.trim() || undefined;
 }
@@ -45,15 +47,25 @@ export async function getCalorieNinjasNutrition(
 
   try {
     const url = `${NUTRITION_URL}?query=${encodeURIComponent(trimmed)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const res = await fetch(url, {
       method: "GET",
       headers: { "X-Api-Key": key },
+      signal: controller.signal,
       next: { revalidate: 0 },
     });
+    clearTimeout(timeoutId);
 
     if (!res.ok) return null;
 
-    const json = (await res.json()) as { items?: CalorieNinjasItem[] };
+    const text = await res.text();
+    let json: { items?: CalorieNinjasItem[] };
+    try {
+      json = JSON.parse(text) as { items?: CalorieNinjasItem[] };
+    } catch {
+      return null;
+    }
     const items = json.items?.filter(
       (i) => i != null && Number.isFinite(i.calories)
     );

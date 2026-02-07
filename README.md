@@ -42,7 +42,7 @@ In `.env` you need:
 
 - `GROQ_API_KEY` — free at [Groq Console](https://console.groq.com)
 - `DATABASE_URL` — Postgres connection string (e.g. from Neon or Supabase)
-- `CALORIE_NINJAS_API_KEY` — optional; get a key at [CalorieNinjas](https://calorieninjas.com/api) for better food estimates (natural-language queries, quantities like "3 eggs" or "1lb chicken")
+- `CALORIE_NINJAS_API_KEY` — optional; get a key at [CalorieNinjas](https://calorieninjas.com/api) for better food estimates (natural-language queries, quantities like "3 eggs" or "1lb chicken"). **Never commit API keys**—use `.env` locally (see `.env.example`) and set env vars in Vercel for production.
 
 Create the DB schema once:
 
