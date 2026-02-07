@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { callGroq } from "@/lib/ai";
 import { AROMI_SYSTEM_PROMPT } from "@/lib/aromi-prompt";
+import { getCalorieNinjasNutrition } from "@/lib/calorie-ninjas";
 import { searchNutrition } from "@/lib/food-api";
+import { clampCaloriesByCategory } from "@/lib/food-sanity";
 import type { AromiRequest, AromiResponse } from "@/lib/types";
 
 const MAX_KCAL_PER_SERVING = 2000;
@@ -68,22 +70,37 @@ function sanitizeCalories(raw: unknown): number | null {
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as AromiRequest;
-    // Enrich food_estimation with free API data when available
-    let apiNutrition: Record<string, unknown> | null = null;
-    if (
+    const foodText =
       body.intent === "food_estimation" &&
       body.food_text &&
       typeof body.food_text === "string"
-    ) {
-      const estimate = await searchNutrition(body.food_text);
-      if (estimate) {
+        ? body.food_text
+        : "";
+
+    // Fetch nutrition in parallel: CalorieNinjas (primary) + Open Food Facts (fallback)
+    let apiNutrition: Record<string, unknown> | null = null;
+    if (body.intent === "food_estimation" && foodText) {
+      const [cnResult, offResult] = await Promise.all([
+        getCalorieNinjasNutrition(foodText),
+        searchNutrition(foodText),
+      ]);
+      if (cnResult) {
         apiNutrition = {
-          calories: estimate.calories,
-          protein_g: estimate.protein_g,
-          carbs_g: estimate.carbs_g,
-          fat_g: estimate.fat_g,
-          source: estimate.source,
-          confidence_range: estimate.confidence_range,
+          calories: cnResult.calories,
+          protein_g: cnResult.protein_g,
+          carbs_g: cnResult.carbs_g,
+          fat_g: cnResult.fat_g,
+          source: cnResult.source,
+          confidence_range: cnResult.confidence_range,
+        };
+      } else if (offResult) {
+        apiNutrition = {
+          calories: offResult.calories,
+          protein_g: offResult.protein_g,
+          carbs_g: offResult.carbs_g,
+          fat_g: offResult.fat_g,
+          source: offResult.source,
+          confidence_range: offResult.confidence_range,
         };
       }
     }
@@ -100,24 +117,34 @@ export async function POST(req: Request) {
       temperature,
     });
 
-    // When we have Open Food Facts data, use it only if it looks sane; otherwise use Groq
+    // When we have API nutrition (CalorieNinjas or Open Food Facts), use it with overrides + clamp
     if (
       body.intent === "food_estimation" &&
       apiNutrition &&
       typeof apiNutrition.calories === "number"
     ) {
+      const fromCalorieNinjas = apiNutrition.source === "calorieninjas";
       const grams = body.grams && body.grams > 0 ? body.grams : 100;
-      const scale = grams / 100;
-      const offCal = Math.round((apiNutrition.calories as number) * scale);
-      const foodText = body.food_text && typeof body.food_text === "string" ? body.food_text : "";
-      const effectiveGrams = (body.grams != null && body.grams > 0) ? body.grams : parseGramsFromText(foodText);
+      const scale = fromCalorieNinjas ? 1 : grams / 100; // CN returns totals; OFF is per 100g
+      let calories =
+        fromCalorieNinjas
+          ? apiNutrition.calories as number
+          : Math.round((apiNutrition.calories as number) * scale);
+      let protein_g = Math.round((Number(apiNutrition.protein_g) || 0) * scale * 10) / 10;
+      let carbs_g = Math.round((Number(apiNutrition.carbs_g) || 0) * scale * 10) / 10;
+      let fat_g = Math.round((Number(apiNutrition.fat_g) || 0) * scale * 10) / 10;
+
+      const effectiveGrams =
+        body.grams != null && body.grams > 0
+          ? body.grams
+          : parseGramsFromText(foodText);
       const isFat = /\b(butter|ghee|oil|amul)\b/i.test(foodText);
-      const minSaneForFat = effectiveGrams != null && isFat ? Math.round(effectiveGrams * 5) : 0; // ~5 kcal/g minimum
-      if (!isFat || offCal >= minSaneForFat) {
-        let calories = offCal;
-        let protein_g = Math.round((Number(apiNutrition.protein_g) || 0) * scale * 10) / 10;
-        let carbs_g = Math.round((Number(apiNutrition.carbs_g) || 0) * scale * 10) / 10;
-        let fat_g = Math.round((Number(apiNutrition.fat_g) || 0) * scale * 10) / 10;
+      const minSaneForFat =
+        effectiveGrams != null && isFat ? Math.round(effectiveGrams * 5) : 0;
+      const skipOff =
+        !fromCalorieNinjas && isFat && calories < minSaneForFat;
+
+      if (!skipOff) {
         const whey = wheyOverride(foodText, calories, body.grams);
         const fat = fatOverride(foodText, calories, body.grams);
         if (whey) {
@@ -131,17 +158,24 @@ export async function POST(req: Request) {
           carbs_g = fat.carbs_g;
           fat_g = fat.fat_g;
         }
+        const effectiveG =
+          body.grams != null && body.grams > 0 ? body.grams : 100;
+        calories = clampCaloriesByCategory(foodText, calories, effectiveG);
         return NextResponse.json({
           ...aiResponse,
           data: {
             ...aiResponse.data,
             estimated_calories: Math.min(calories, 2000),
-            confidence_range: whey ? "±10% (typical scoop)" : fat ? "±10% (typical)" : (apiNutrition.confidence_range ?? "±10%"),
+            confidence_range: whey
+              ? "±10% (typical scoop)"
+              : fat
+                ? "±10% (typical)"
+                : (apiNutrition.confidence_range ?? "±10%"),
             macros: { protein_g, carbs_g, fat_g },
           },
         });
       }
-      // OFF data is wrong for this query (e.g. 1 kcal for 5g butter) — fall through to use Groq
+      // OFF data wrong for this query (e.g. 1 kcal for 5g butter) — fall through to Groq
     }
 
     // Sanitize AI calorie output so we never send absurd values (e.g. 320380)
@@ -168,7 +202,9 @@ export async function POST(req: Request) {
           macros: { protein_g: fat.protein_g, carbs_g: fat.carbs_g, fat_g: fat.fat_g },
         };
       } else if (sane != null) {
-        aiResponse.data = { ...aiResponse.data, estimated_calories: sane };
+        const effectiveG = (body.grams != null && body.grams > 0) ? body.grams : 100;
+        const clamped = clampCaloriesByCategory(foodText, sane, effectiveG);
+        aiResponse.data = { ...aiResponse.data, estimated_calories: clamped };
       }
     }
 

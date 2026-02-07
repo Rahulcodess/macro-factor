@@ -8,7 +8,7 @@ Started as a hackathon project; the codebase is set up so you can actually run a
 
 ## What you can do
 
-**Food** — Enter stuff like "2 rotis, paneer butter masala" or "eggs 100g". AROMI pulls from Open Food Facts when it can and uses the model for the rest. You get an estimate, then you choose whether to add it to your log. Indian food and free-text work fine.
+**Food** — Enter stuff like "2 rotis, paneer butter masala" or "eggs 100g". If you set a CalorieNinjas API key, we use that first for reliable nutrition; otherwise Open Food Facts, then the model. You get an estimate, then you choose whether to add it to your log. Indian food and free-text work fine.
 
 **Dashboard** — Your last 7 days as a simple calorie line, plus a day-by-day macro breakdown (protein, carbs, fat). Today’s total and a short recent list so you can see how the day is going.
 
@@ -24,7 +24,7 @@ UI is dark, mobile-friendly, and inspired by apps like MacroFactor. Nothing fanc
 
 - Next.js (App Router), React, TypeScript, Tailwind
 - Groq (Llama 3.3 70B) for the AI
-- Open Food Facts for nutrition (no key)
+- CalorieNinjas API for nutrition when `CALORIE_NINJAS_API_KEY` is set (recommended); otherwise Open Food Facts (no key)
 - PostgreSQL for users and food logs (we use Neon; any Postgres works)
 
 ---
@@ -42,6 +42,7 @@ In `.env` you need:
 
 - `GROQ_API_KEY` — free at [Groq Console](https://console.groq.com)
 - `DATABASE_URL` — Postgres connection string (e.g. from Neon or Supabase)
+- `CALORIE_NINJAS_API_KEY` — optional; get a key at [CalorieNinjas](https://calorieninjas.com/api) for better food estimates (natural-language queries, quantities like "3 eggs" or "1lb chicken")
 
 Create the DB schema once:
 
@@ -63,7 +64,7 @@ Open `http://localhost:3000`. You’ll land on the homepage; “Get started” t
 
 ## Deploy (e.g. Vercel)
 
-Push to GitHub, hook the repo up in Vercel, and set `GROQ_API_KEY` and `DATABASE_URL` in the project env. Build should just work. Make sure your DB allows connections from Vercel (Neon/Supabase do by default). There’s a `DEPLOYMENT.md` in the repo if you want a bit more detail.
+Push to GitHub, hook the repo up in Vercel, and set `GROQ_API_KEY`, `DATABASE_URL`, and optionally `CALORIE_NINJAS_API_KEY` in the project env. Build should just work. Make sure your DB allows connections from Vercel (Neon/Supabase do by default). There’s a `DEPLOYMENT.md` in the repo if you want a bit more detail.
 
 ---
 
@@ -71,7 +72,7 @@ Push to GitHub, hook the repo up in Vercel, and set `GROQ_API_KEY` and `DATABASE
 
 Tables: `users`, `food_logs`, `workout_plans`. See `schema.sql`.
 
-AROMI is a single POST to `/api/aromi` with a JSON body: `intent` (e.g. `food_estimation`, `workout_plan`), optional `food_text`, `meal_type`, `grams`, and `user_context`. The backend can inject Open Food Facts data into the prompt when it’s a food query, then returns JSON the UI knows how to render. Auth for food logs is Bearer token (user id from login); login and food-logs APIs are in `app/api/auth/*` and `app/api/food-logs`.
+AROMI is a single POST to `/api/aromi` with a JSON body: `intent` (e.g. `food_estimation`, `workout_plan`), optional `food_text`, `meal_type`, `grams`, and `user_context`. The backend can inject CalorieNinjas or Open Food Facts data into the prompt when it’s a food query, then returns JSON the UI knows how to render. Auth for food logs is Bearer token (user id from login); login and food-logs APIs are in `app/api/auth/*` and `app/api/food-logs`.
 
 ---
 
