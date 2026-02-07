@@ -67,13 +67,30 @@ function sanitizeCalories(raw: number): number | null {
 }
 
 /** Cap obviously wrong estimates for common Indian breads (e.g. 2 chapati ~120–160 kcal). */
-function capChapatiRotiCalories(foodText: string, calories: number): number {
+function capFoodCalories(foodText: string, calories: number): number {
   if (!/\b(chapati|chappati|roti|phulka|paratha)\b/i.test(foodText)) return calories;
   const match = foodText.match(/(\d+)\s*(piece|pc|pcs|no|number)?/i) || foodText.match(/^(\d+)/);
   const pieces = match ? Math.min(10, Math.max(1, parseInt(match[1], 10))) : 2;
   const maxPerPiece = 90;
   const capped = Math.min(calories, pieces * maxPerPiece);
   return capped;
+}
+
+/** Cap absurd egg estimates (e.g. 2 eggs ~140–160 kcal, not 644). */
+function capEggCalories(foodText: string, calories: number): number {
+  if (!/\b(egg|eggs)\b/i.test(foodText)) return calories;
+  const match = foodText.match(/(\d+)\s*(egg|eggs)?/i) || foodText.match(/^(\d+)/);
+  const count = match ? Math.min(20, Math.max(1, parseInt(match[1], 10))) : 1;
+  const maxPerEgg = 90;
+  return Math.min(calories, count * maxPerEgg);
+}
+
+/** Apply all food-specific caps so displayed/saved calories are sane. */
+function capFoodCalories(foodText: string, calories: number): number {
+  let out = calories;
+  out = capFoodCalories(foodText, out);
+  out = capEggCalories(foodText, out);
+  return out;
 }
 
 const DEFAULT_CONTEXT: UserContext = {
@@ -211,7 +228,7 @@ export default function DashboardPage() {
         const cal = extractEstimatedCalories(data.data as Record<string, unknown> | undefined);
         if (cal != null && Number.isFinite(cal) && (intent === "food_estimation" || intent === "food_log")) {
           const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
-          const cappedCal = capChapatiRotiCalories(intent === "food_estimation" || intent === "food_log" ? input : "", cal);
+          const cappedCal = capFoodCalories(intent === "food_estimation" || intent === "food_log" ? input : "", cal);
           setPendingLog({
             food_text: (intent === "food_estimation" || intent === "food_log" ? input : "") || "Logged food",
             meal_type: mealType,
@@ -279,7 +296,7 @@ export default function DashboardPage() {
   const estimatedCaloriesValue = extractEstimatedCalories(d as Record<string, unknown> | undefined);
   const displayCalories =
     estimatedCaloriesValue != null && Number.isFinite(estimatedCaloriesValue)
-      ? Math.min(MAX_KCAL_PER_SERVING, capChapatiRotiCalories(input, estimatedCaloriesValue))
+      ? Math.min(MAX_KCAL_PER_SERVING, capFoodCalories(input, estimatedCaloriesValue))
       : null;
   const hasCalories = displayCalories != null;
   const showConfirm = hasCalories && pendingLog;
@@ -654,7 +671,7 @@ export default function DashboardPage() {
                     disabled={saving}
                     onClick={async () => {
                       const rawCal = displayCalories ?? extractEstimatedCalories(d as Record<string, unknown>);
-                      const cal = rawCal != null ? capChapatiRotiCalories(input, rawCal) : null;
+                      const cal = rawCal != null ? capFoodCalories(input, rawCal) : null;
                       if (cal == null || !Number.isFinite(cal)) return;
                       const gramsNum = grams.trim() ? parseInt(grams.trim(), 10) : undefined;
                       const entry = pendingLog ?? {
